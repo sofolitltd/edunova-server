@@ -84,6 +84,8 @@ func runMigrations() {
 	runPracticeMigration()
 	runTeacherMigration()
 	runBatchTeacherMigration()
+	runBatchSubjectMigration()
+	runOMRMigration()
 	seedAdminUser()
 	seedDemoHierarchy()
 	seedDemoExpenses()
@@ -417,6 +419,37 @@ func runBatchTeacherMigration() {
 	)`)
 	if err != nil {
 		log.Printf("Warning: failed to create batch_teachers table: %v", err)
+	}
+}
+
+func runBatchSubjectMigration() {
+	// No UNIQUE(batch_id, subject_id) here: a subject can be taught at
+	// several different times in the same batch (e.g. two periods a week),
+	// so each schedule slot is its own row.
+	_, err := DB.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS batch_subjects (
+		id SERIAL PRIMARY KEY,
+		batch_id INT REFERENCES batches(id) ON DELETE CASCADE,
+		subject_id INT REFERENCES subjects(id) ON DELETE CASCADE,
+		days TEXT[] DEFAULT '{}',
+		start_time VARCHAR(10) DEFAULT '',
+		end_time VARCHAR(10) DEFAULT '',
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create batch_subjects table: %v", err)
+	}
+	_, err = DB.Exec(context.Background(), `
+	ALTER TABLE batch_subjects ADD COLUMN IF NOT EXISTS teacher_id INT REFERENCES teachers(id) ON DELETE SET NULL`)
+	if err != nil {
+		log.Printf("Warning: failed to add teacher_id to batch_subjects: %v", err)
+	}
+	// Older deployments created the table with this constraint before
+	// multiple time slots per subject were supported; drop it if present.
+	_, err = DB.Exec(context.Background(), `
+	ALTER TABLE batch_subjects DROP CONSTRAINT IF EXISTS batch_subjects_batch_id_subject_id_key`)
+	if err != nil {
+		log.Printf("Warning: failed to drop batch_subjects unique constraint: %v", err)
 	}
 }
 
@@ -2182,6 +2215,7 @@ func runLiveExamMigration() {
 	ctx := context.Background()
 	alters := []string{
 		`ALTER TABLE exams ADD COLUMN IF NOT EXISTS is_live BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE exams ADD COLUMN IF NOT EXISTS total_marks INT DEFAULT 0`,
 		`ALTER TABLE exams ADD COLUMN IF NOT EXISTS live_at TIMESTAMP WITH TIME ZONE DEFAULT NULL`,
 		`ALTER TABLE exams ADD COLUMN IF NOT EXISTS class_level VARCHAR(20) DEFAULT ''`,
 		`ALTER TABLE exams ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''`,
@@ -2493,4 +2527,85 @@ func seedDemoSentenceExercises() {
 		}
 	}
 	fmt.Printf("Seeded %d demo sentence exercises\n", len(exercises))
+}
+
+func runOMRMigration() {
+	ctx := context.Background()
+	_, err := DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS omr_exams (
+		id SERIAL PRIMARY KEY,
+		title VARCHAR(255) NOT NULL,
+		class_level VARCHAR(50) DEFAULT '',
+		subject VARCHAR(100) DEFAULT '',
+		question_count INT NOT NULL,
+		columns INT NOT NULL DEFAULT 2,
+		exam_code VARCHAR(10) NOT NULL UNIQUE,
+		created_by INT REFERENCES admin_users(id) ON DELETE SET NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create omr_exams table: %v", err)
+	}
+
+	_, err = DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS omr_questions (
+		id SERIAL PRIMARY KEY,
+		omr_exam_id INT REFERENCES omr_exams(id) ON DELETE CASCADE,
+		question_number INT NOT NULL,
+		correct_option INT NOT NULL CHECK (correct_option BETWEEN 1 AND 4),
+		UNIQUE(omr_exam_id, question_number)
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create omr_questions table: %v", err)
+	}
+
+	_, err = DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS omr_students (
+		id SERIAL PRIMARY KEY,
+		omr_exam_id INT REFERENCES omr_exams(id) ON DELETE CASCADE,
+		roll_number VARCHAR(10) NOT NULL,
+		name VARCHAR(255) NOT NULL DEFAULT '',
+		UNIQUE(omr_exam_id, roll_number)
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create omr_students table: %v", err)
+	}
+
+	_, err = DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS omr_sheets (
+		id SERIAL PRIMARY KEY,
+		omr_exam_id INT REFERENCES omr_exams(id) ON DELETE CASCADE,
+		image_path VARCHAR(500) NOT NULL,
+		detected_roll_number VARCHAR(10) DEFAULT '',
+		matched_student_id INT REFERENCES omr_students(id) ON DELETE SET NULL,
+		status VARCHAR(20) NOT NULL DEFAULT 'needs_review',
+		score INT DEFAULT 0,
+		total_questions INT DEFAULT 0,
+		raw_detection JSONB DEFAULT '{}',
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create omr_sheets table: %v", err)
+	}
+	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_omr_sheets_exam ON omr_sheets(omr_exam_id)`)
+	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_omr_questions_exam ON omr_questions(omr_exam_id)`)
+	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_omr_students_exam ON omr_students(omr_exam_id)`)
+
+	// enrollment_id links a roster row to a real enrollment (and, through it,
+	// to a registered app login) so a scored sheet can be credited to an
+	// actual student instead of just a typed-in roll/name pair.
+	_, err = DB.Exec(ctx, `ALTER TABLE omr_students ADD COLUMN IF NOT EXISTS enrollment_id INT REFERENCES enrollments(id) ON DELETE SET NULL`)
+	if err != nil {
+		log.Printf("Warning: failed to add omr_students.enrollment_id: %v", err)
+	}
+
+	// student_result_id links a scored sheet to the student_results row it
+	// produced, so a later correction updates that row instead of duplicating it.
+	_, err = DB.Exec(ctx, `ALTER TABLE omr_sheets ADD COLUMN IF NOT EXISTS student_result_id INT REFERENCES student_results(id) ON DELETE SET NULL`)
+	if err != nil {
+		log.Printf("Warning: failed to add omr_sheets.student_result_id: %v", err)
+	}
+
+	fmt.Println("OMR migration completed")
 }

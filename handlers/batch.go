@@ -388,6 +388,104 @@ func AdminDeleteBatch(c *gin.Context) {
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "batch deleted"})
 }
 
+// ========== BATCH <-> SUBJECT + SCHEDULE ==========
+
+func AdminGetBatchSubjects(c *gin.Context) {
+	batchID := c.Param("id")
+
+	rows, err := database.DB.Query(context.Background(),
+		`SELECT bs.id, bs.subject_id, s.name, bs.teacher_id, COALESCE(t.full_name, ''), COALESCE(bs.days, '{}'), COALESCE(bs.start_time, ''), COALESCE(bs.end_time, '')
+		 FROM batch_subjects bs
+		 JOIN subjects s ON bs.subject_id = s.id
+		 LEFT JOIN teachers t ON bs.teacher_id = t.id
+		 WHERE bs.batch_id = $1
+		 ORDER BY s.name ASC`, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	var subjects []models.BatchSubject
+	for rows.Next() {
+		var s models.BatchSubject
+		if err := rows.Scan(&s.ID, &s.SubjectID, &s.SubjectName, &s.TeacherID, &s.TeacherName, &s.Days, &s.StartTime, &s.EndTime); err != nil {
+			continue
+		}
+		subjects = append(subjects, s)
+	}
+	if subjects == nil {
+		subjects = []models.BatchSubject{}
+	}
+	c.JSON(http.StatusOK, subjects)
+}
+
+// AdminAssignBatchSubject creates a new schedule entry for a subject in this
+// batch. A subject can appear several times (e.g. taught at two different
+// periods in the week), so this is always a plain insert, never an upsert.
+func AdminAssignBatchSubject(c *gin.Context) {
+	batchID := c.Param("id")
+
+	var req models.AssignBatchSubjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	_, err := database.DB.Exec(context.Background(),
+		`INSERT INTO batch_subjects (batch_id, subject_id, teacher_id, days, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6)`,
+		batchID, req.SubjectID, req.TeacherID, req.Days, req.StartTime, req.EndTime)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to assign subject"})
+		return
+	}
+	c.JSON(http.StatusCreated, models.SuccessResponse{Message: "subject assigned"})
+}
+
+// AdminUpdateBatchSubject edits one specific schedule entry (identified by
+// its own row id, not by subject) — used when the admin edits a routine cell.
+func AdminUpdateBatchSubject(c *gin.Context) {
+	batchID := c.Param("id")
+	entryID := c.Param("entryId")
+
+	var req models.AssignBatchSubjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	tag, err := database.DB.Exec(context.Background(),
+		`UPDATE batch_subjects SET subject_id = $1, teacher_id = $2, days = $3, start_time = $4, end_time = $5
+		 WHERE id = $6 AND batch_id = $7`,
+		req.SubjectID, req.TeacherID, req.Days, req.StartTime, req.EndTime, entryID, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update subject"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "assignment not found"})
+		return
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{Message: "subject updated"})
+}
+
+func AdminUnassignBatchSubject(c *gin.Context) {
+	batchID := c.Param("id")
+	entryID := c.Param("entryId")
+
+	tag, err := database.DB.Exec(context.Background(),
+		`DELETE FROM batch_subjects WHERE id = $1 AND batch_id = $2`, entryID, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "assignment not found"})
+		return
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{Message: "subject unassigned"})
+}
+
 func AdminGetBatchStats(c *gin.Context) {
 	courseID := c.Query("course_id")
 	if courseID == "" {

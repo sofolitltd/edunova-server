@@ -1,0 +1,18 @@
+FROM golang:1.26-alpine AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o server .
+
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=build /app/server .
+COPY docker-entrypoint.sh .
+RUN chmod +x docker-entrypoint.sh
+
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["./docker-entrypoint.sh"]

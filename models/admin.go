@@ -106,18 +106,20 @@ type Exam struct {
 	Time           string    `json:"time"`
 	Duration       string    `json:"duration"`
 	TotalQuestions int       `json:"total_questions"`
+	TotalMarks     int       `json:"total_marks"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type CreateExamRequest struct {
-	Title     string                `json:"title" binding:"required"`
-	CourseID  int                   `json:"course_id" binding:"required"`
-	BatchID   int                   `json:"batch_id"`
-	Date      string                `json:"date" binding:"required"`
-	Time      string                `json:"time" binding:"required"`
-	Duration  string                `json:"duration" binding:"required"`
-	Questions []ExamQuestionPayload `json:"questions"`
+	Title      string                `json:"title" binding:"required"`
+	CourseID   int                   `json:"course_id"`
+	BatchID    int                   `json:"batch_id"`
+	Date       string                `json:"date" binding:"required"`
+	Time       string                `json:"time" binding:"required"`
+	Duration   string                `json:"duration" binding:"required"`
+	TotalMarks int                   `json:"total_marks"`
+	Questions  []ExamQuestionPayload `json:"questions"`
 }
 
 type ExamQuestionPayload struct {
@@ -153,10 +155,16 @@ type ExamResult struct {
 }
 
 type DashboardStats struct {
-	TotalUsers    int `json:"total_users"`
-	VerifiedUsers int `json:"verified_users"`
-	TotalCourses  int `json:"total_courses"`
-	TotalExams    int `json:"total_exams"`
+	TotalUsers          int                 `json:"total_users"`
+	VerifiedUsers       int                 `json:"verified_users"`
+	TotalCourses        int                 `json:"total_courses"`
+	TotalExams          int                 `json:"total_exams"`
+	WeeklyRegistrations []DailyRegistration `json:"weekly_registrations"`
+}
+
+type DailyRegistration struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
 }
 
 type PaginatedUsers struct {
@@ -587,6 +595,28 @@ type CreateBatchRequest struct {
 	Year         int      `json:"year"`
 	Section      string   `json:"section" binding:"required"`
 	Code         string   `json:"code" binding:"required"`
+}
+
+// BatchSubject is a subject taught within a batch, with its own weekly
+// schedule and assigned teacher (a batch can teach several subjects at
+// different day/time slots, each with its own teacher).
+type BatchSubject struct {
+	ID          int      `json:"id"`
+	SubjectID   int      `json:"subject_id"`
+	SubjectName string   `json:"subject_name"`
+	TeacherID   *int     `json:"teacher_id"`
+	TeacherName string   `json:"teacher_name"`
+	Days        []string `json:"days"`
+	StartTime   string   `json:"start_time"`
+	EndTime     string   `json:"end_time"`
+}
+
+type AssignBatchSubjectRequest struct {
+	SubjectID int      `json:"subject_id" binding:"required"`
+	TeacherID *int     `json:"teacher_id"`
+	Days      []string `json:"days"`
+	StartTime string   `json:"start_time"`
+	EndTime   string   `json:"end_time"`
 }
 
 type Note struct {

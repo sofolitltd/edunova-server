@@ -65,7 +65,48 @@ func AdminDashboard(c *gin.Context) {
 	_ = database.DB.QueryRow(context.Background(), `SELECT COUNT(*) FROM courses`).Scan(&stats.TotalCourses)
 	_ = database.DB.QueryRow(context.Background(), `SELECT COUNT(*) FROM exams`).Scan(&stats.TotalExams)
 
+	stats.WeeklyRegistrations = weeklyRegistrations(context.Background())
+
 	c.JSON(http.StatusOK, stats)
+}
+
+// weeklyRegistrations returns per-day user registration counts for the last
+// 7 days (oldest first, today last), filling in zero for days with no signups.
+func weeklyRegistrations(ctx context.Context) []models.DailyRegistration {
+	rows, err := database.DB.Query(ctx, `
+		SELECT created_at::date AS day, COUNT(*)
+		FROM users
+		WHERE created_at >= (CURRENT_DATE - INTERVAL '6 days')
+		GROUP BY day`)
+	if err != nil {
+		log.Printf("weeklyRegistrations query failed: %v", err)
+		rows = nil
+	}
+
+	counts := make(map[string]int)
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var day time.Time
+			var count int
+			if err := rows.Scan(&day, &count); err != nil {
+				continue
+			}
+			counts[day.Format("2006-01-02")] = count
+		}
+	}
+
+	result := make([]models.DailyRegistration, 0, 7)
+	today := time.Now()
+	for i := 6; i >= 0; i-- {
+		date := today.AddDate(0, 0, -i)
+		key := date.Format("2006-01-02")
+		result = append(result, models.DailyRegistration{
+			Date:  key,
+			Count: counts[key],
+		})
+	}
+	return result
 }
 
 func AdminGetProfile(c *gin.Context) {
@@ -475,8 +516,8 @@ func AdminDeleteCourse(c *gin.Context) {
 func AdminGetExams(c *gin.Context) {
 	batchID := c.Query("batch_id")
 
-	query := `SELECT e.id, e.title, e.course_id, COALESCE(c.title, ''), COALESCE(e.batch_id, 0), COALESCE(b.name, ''),
-		 e.date, e.time, e.duration, e.total_questions, e.created_at, e.updated_at
+	query := `SELECT e.id, e.title, COALESCE(e.course_id, 0), COALESCE(c.title, ''), COALESCE(e.batch_id, 0), COALESCE(b.name, ''),
+		 e.date, e.time, e.duration, e.total_questions, e.total_marks, e.created_at, e.updated_at
 		 FROM exams e
 		 LEFT JOIN courses c ON e.course_id = c.id
 		 LEFT JOIN batches b ON e.batch_id = b.id`
@@ -512,7 +553,7 @@ func AdminGetExams(c *gin.Context) {
 	var exams []models.Exam
 	for rows.Next() {
 		var ex models.Exam
-		_ = rows.Scan(&ex.ID, &ex.Title, &ex.CourseID, &ex.CourseName, &ex.BatchID, &ex.BatchName, &ex.Date, &ex.Time, &ex.Duration, &ex.TotalQuestions, &ex.CreatedAt, &ex.UpdatedAt)
+		_ = rows.Scan(&ex.ID, &ex.Title, &ex.CourseID, &ex.CourseName, &ex.BatchID, &ex.BatchName, &ex.Date, &ex.Time, &ex.Duration, &ex.TotalQuestions, &ex.TotalMarks, &ex.CreatedAt, &ex.UpdatedAt)
 		exams = append(exams, ex)
 	}
 
@@ -538,15 +579,19 @@ func AdminCreateExam(c *gin.Context) {
 	if req.BatchID != 0 {
 		batchID = &req.BatchID
 	}
+	var courseID *int
+	if req.CourseID != 0 {
+		courseID = &req.CourseID
+	}
 
 	var exam models.Exam
 	err := database.DB.QueryRow(
 		context.Background(),
-		`INSERT INTO exams (title, course_id, batch_id, date, time, duration, total_questions)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, title, course_id, COALESCE(batch_id, 0), date, time, duration, total_questions, created_at, updated_at`,
-		req.Title, req.CourseID, batchID, req.Date, req.Time, req.Duration, len(req.Questions),
-	).Scan(&exam.ID, &exam.Title, &exam.CourseID, &exam.BatchID, &exam.Date, &exam.Time, &exam.Duration, &exam.TotalQuestions, &exam.CreatedAt, &exam.UpdatedAt)
+		`INSERT INTO exams (title, course_id, batch_id, date, time, duration, total_questions, total_marks)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 RETURNING id, title, COALESCE(course_id, 0), COALESCE(batch_id, 0), date, time, duration, total_questions, total_marks, created_at, updated_at`,
+		req.Title, courseID, batchID, req.Date, req.Time, req.Duration, len(req.Questions), req.TotalMarks,
+	).Scan(&exam.ID, &exam.Title, &exam.CourseID, &exam.BatchID, &exam.Date, &exam.Time, &exam.Duration, &exam.TotalQuestions, &exam.TotalMarks, &exam.CreatedAt, &exam.UpdatedAt)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create exam"})
@@ -581,15 +626,19 @@ func AdminUpdateExam(c *gin.Context) {
 	if req.BatchID != 0 {
 		batchID = &req.BatchID
 	}
+	var courseID *int
+	if req.CourseID != 0 {
+		courseID = &req.CourseID
+	}
 
 	var exam models.Exam
 	err := database.DB.QueryRow(
 		context.Background(),
-		`UPDATE exams SET title=$1, course_id=$2, batch_id=$3, date=$4, time=$5, duration=$6, total_questions=$7, updated_at=NOW()
+		`UPDATE exams SET title=$1, course_id=$2, batch_id=$3, date=$4, time=$5, duration=$6, total_marks=$7, updated_at=NOW()
 		 WHERE id=$8
-		 RETURNING id, title, course_id, COALESCE(batch_id, 0), date, time, duration, total_questions, created_at, updated_at`,
-		req.Title, req.CourseID, batchID, req.Date, req.Time, req.Duration, len(req.Questions), id,
-	).Scan(&exam.ID, &exam.Title, &exam.CourseID, &exam.BatchID, &exam.Date, &exam.Time, &exam.Duration, &exam.TotalQuestions, &exam.CreatedAt, &exam.UpdatedAt)
+		 RETURNING id, title, COALESCE(course_id, 0), COALESCE(batch_id, 0), date, time, duration, total_questions, total_marks, created_at, updated_at`,
+		req.Title, courseID, batchID, req.Date, req.Time, req.Duration, req.TotalMarks, id,
+	).Scan(&exam.ID, &exam.Title, &exam.CourseID, &exam.BatchID, &exam.Date, &exam.Time, &exam.Duration, &exam.TotalQuestions, &exam.TotalMarks, &exam.CreatedAt, &exam.UpdatedAt)
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "exam not found"})
@@ -598,16 +647,6 @@ func AdminUpdateExam(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
 		return
-	}
-
-	_, _ = database.DB.Exec(context.Background(), `DELETE FROM exam_questions WHERE exam_id = $1`, exam.ID)
-	for _, q := range req.Questions {
-		_, _ = database.DB.Exec(
-			context.Background(),
-			`INSERT INTO exam_questions (exam_id, question_text, option_a, option_b, option_c, option_d, correct_option)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			exam.ID, q.QuestionText, q.OptionA, q.OptionB, q.OptionC, q.OptionD, q.CorrectOption,
-		)
 	}
 
 	c.JSON(http.StatusOK, exam)

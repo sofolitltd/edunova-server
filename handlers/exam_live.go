@@ -77,7 +77,7 @@ func sendExamLiveNotification(examID string) {
 
 func UserGetLiveExams(c *gin.Context) {
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT e.id, e.title, e.course_id, COALESCE(c.title,''), COALESCE(e.date,''), COALESCE(e.time,''),
+		`SELECT e.id, e.title, COALESCE(e.course_id, 0), COALESCE(c.title,''), COALESCE(e.date,''), COALESCE(e.time,''),
 		 COALESCE(e.duration,''), e.total_questions, COALESCE(e.description,''), COALESCE(e.class_level,''),
 		 e.is_live, e.live_at, e.created_at, e.updated_at
 		 FROM exams e

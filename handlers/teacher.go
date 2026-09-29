@@ -425,7 +425,8 @@ func TeacherGetMyBatches(c *gin.Context) {
 
 	rows, err := database.DB.Query(context.Background(),
 		`SELECT b.id, b.name, b.class_level, COALESCE(b.shift, ''), COALESCE(b.code, ''), COALESCE(b.schedule, ''),
-		 (SELECT COUNT(*) FROM enrollments e WHERE e.batch_id = b.id AND e.status = 'approved')
+		 (SELECT COUNT(*) FROM enrollments e WHERE e.batch_id = b.id AND e.status = 'approved'),
+		 COALESCE(b.course_id, 0)
 		 FROM batch_teachers bt
 		 JOIN batches b ON bt.batch_id = b.id
 		 WHERE bt.teacher_id = $1
@@ -439,7 +440,7 @@ func TeacherGetMyBatches(c *gin.Context) {
 	var batches []models.TeacherBatch
 	for rows.Next() {
 		var b models.TeacherBatch
-		if err := rows.Scan(&b.ID, &b.Name, &b.ClassLevel, &b.Shift, &b.Code, &b.Schedule, &b.StudentCount); err != nil {
+		if err := rows.Scan(&b.ID, &b.Name, &b.ClassLevel, &b.Shift, &b.Code, &b.Schedule, &b.StudentCount, &b.CourseID); err != nil {
 			continue
 		}
 		batches = append(batches, b)

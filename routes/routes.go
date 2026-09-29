@@ -11,6 +11,7 @@ func SetupRoutes(r *gin.Engine) {
 	r.Use(middleware.CORS())
 
 	r.GET("/health", handlers.Health)
+	r.Static("/uploads", "./uploads")
 
 	api := r.Group("/api")
 	{
@@ -35,6 +36,11 @@ func SetupRoutes(r *gin.Engine) {
 			auth.PUT("/user/profile", handlers.UpdateUserProfile)
 			auth.PUT("/change-password", handlers.ChangePassword)
 			auth.GET("/user/enrollments", handlers.GetUserEnrollments)
+			auth.GET("/batches/:id", handlers.UserGetBatchDetail)
+			auth.GET("/batches/:id/subjects", handlers.UserGetBatchSubjects)
+			auth.GET("/batches/:id/exams", handlers.UserGetBatchExams)
+			auth.GET("/batches/:id/leaderboard", handlers.UserGetBatchLeaderboard)
+			auth.GET("/batches/:id/my-results", handlers.UserGetBatchMyResults)
 			auth.GET("/user/dashboard", handlers.GetUserDashboardStats)
 			auth.GET("/user/free-courses", handlers.GetUserFreeCourses)
 			auth.POST("/device-token", handlers.RegisterDeviceToken)
@@ -115,36 +121,29 @@ func SetupRoutes(r *gin.Engine) {
 			secured.GET("/batches/:id/next-student-id", handlers.AdminNextStudentID)
 			secured.GET("/batches/check-student-id", handlers.AdminCheckStudentID)
 
-			// Academic management
-			secured.GET("/classes", handlers.AdminGetClasses)
+			// Academic management (read access is granted to staff below;
+			// creating/editing/deleting the hierarchy itself stays admin-only)
 			secured.POST("/classes", handlers.AdminCreateClass)
 			secured.PUT("/classes/:id", handlers.AdminUpdateClass)
 			secured.DELETE("/classes/:id", handlers.AdminDeleteClass)
 
-			secured.GET("/subjects", handlers.AdminGetSubjects)
 			secured.POST("/subjects", handlers.AdminCreateSubject)
 			secured.PUT("/subjects/:id", handlers.AdminUpdateSubject)
 			secured.DELETE("/subjects/:id", handlers.AdminDeleteSubject)
 
-			secured.GET("/books", handlers.AdminGetBooks)
 			secured.POST("/books", handlers.AdminCreateBook)
 			secured.PUT("/books/:id", handlers.AdminUpdateBook)
 			secured.DELETE("/books/:id", handlers.AdminDeleteBook)
 
-			secured.GET("/chapters", handlers.AdminGetChapters)
 			secured.POST("/chapters", handlers.AdminCreateChapter)
 			secured.PUT("/chapters/:id", handlers.AdminUpdateChapter)
 			secured.DELETE("/chapters/:id", handlers.AdminDeleteChapter)
 
-			secured.GET("/topics", handlers.AdminGetTopics)
 			secured.POST("/topics", handlers.AdminCreateTopic)
 			secured.PUT("/topics/:id", handlers.AdminUpdateTopic)
 			secured.DELETE("/topics/:id", handlers.AdminDeleteTopic)
 
-			// Question bank
-			secured.GET("/questions", handlers.AdminGetQuestions)
-			secured.GET("/questions/:id", handlers.AdminGetQuestion)
-			secured.POST("/questions", handlers.AdminCreateQuestion)
+			// Question bank (read + create are granted to staff below)
 			secured.PUT("/questions/:id", handlers.AdminUpdateQuestion)
 			secured.DELETE("/questions/:id", handlers.AdminDeleteQuestion)
 			secured.PUT("/questions/:id/status", handlers.AdminUpdateQuestionStatus)
@@ -237,6 +236,27 @@ func SetupRoutes(r *gin.Engine) {
 			secured.POST("/batches/:id/teachers", handlers.AdminAssignBatchTeacher)
 			secured.DELETE("/batches/:id/teachers/:teacherId", handlers.AdminUnassignBatchTeacher)
 
+			// Batch <-> subject assignment + per-subject weekly schedule
+			// (a subject can have several entries, one per class period)
+			secured.GET("/batches/:id/subjects", handlers.AdminGetBatchSubjects)
+			secured.POST("/batches/:id/subjects", handlers.AdminAssignBatchSubject)
+			secured.PUT("/batches/:id/subjects/:entryId", handlers.AdminUpdateBatchSubject)
+			secured.DELETE("/batches/:id/subjects/:entryId", handlers.AdminUnassignBatchSubject)
+
+			// OMR (paper-exam bubble sheets)
+			secured.GET("/omr/check", handlers.AdminCheckOMRScannable)
+			secured.GET("/omr/template-preview", handlers.AdminPreviewOMRTemplate)
+			secured.POST("/omr/exams", handlers.AdminCreateOMRExam)
+			secured.GET("/omr/exams", handlers.AdminListOMRExams)
+			secured.GET("/omr/exams/:id", handlers.AdminGetOMRExam)
+			secured.GET("/omr/exams/:id/template", handlers.AdminGetOMRTemplate)
+			secured.POST("/omr/exams/:id/students", handlers.AdminAddOMRStudents)
+			secured.POST("/omr/exams/:id/import-roster", handlers.AdminImportOMRRoster)
+			secured.GET("/omr/exams/:id/sheets", handlers.AdminListOMRSheets)
+			secured.GET("/omr/exams/:id/sheets/:sheetId", handlers.AdminGetOMRSheet)
+			secured.PATCH("/omr/exams/:id/sheets/:sheetId", handlers.AdminUpdateOMRSheet)
+			secured.POST("/omr/sheets", handlers.AdminUploadOMRSheet)
+
 			// Admin management (master_admin only)
 			master := secured.Group("")
 			master.Use(middleware.MasterRequired())
@@ -302,6 +322,20 @@ func SetupRoutes(r *gin.Engine) {
 			staff.POST("/results", handlers.AdminCreateResult)
 			staff.PUT("/results/:id", handlers.AdminUpdateResult)
 			staff.DELETE("/results/:id", handlers.AdminDeleteResult)
+
+			// Question bank — teachers can browse the hierarchy and the bank,
+			// and contribute new questions (e.g. via an exam's "add manually"
+			// flow), so every question entered from either portal lands in one
+			// central, reusable bank. Managing the hierarchy itself and
+			// editing/deleting/publishing bank entries stays admin-only.
+			staff.GET("/classes", handlers.AdminGetClasses)
+			staff.GET("/subjects", handlers.AdminGetSubjects)
+			staff.GET("/books", handlers.AdminGetBooks)
+			staff.GET("/chapters", handlers.AdminGetChapters)
+			staff.GET("/topics", handlers.AdminGetTopics)
+			staff.GET("/questions", handlers.AdminGetQuestions)
+			staff.GET("/questions/:id", handlers.AdminGetQuestion)
+			staff.POST("/questions", handlers.AdminCreateQuestion)
 		}
 	}
 }

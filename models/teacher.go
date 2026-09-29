@@ -62,4 +62,5 @@ type TeacherBatch struct {
 	Code         string `json:"code"`
 	Schedule     string `json:"schedule"`
 	StudentCount int    `json:"student_count"`
+	CourseID     int    `json:"course_id"`
 }

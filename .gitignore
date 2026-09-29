@@ -1,3 +1,5 @@
 edunova-server
 .env
 serviceAccountKey.json
+.vercel
+.env*
