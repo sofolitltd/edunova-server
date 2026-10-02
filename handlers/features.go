@@ -569,9 +569,10 @@ func AdminDeleteLesson(c *gin.Context) {
 func AdminGetPayments(c *gin.Context) {
 	status := c.Query("status")
 	userID := c.Query("user_id")
+	batchID := c.Query("batch_id")
 	query := `
 		SELECT p.id, p.user_id, u.full_name, u.mobile, p.enrollment_id, p.course_id,
-		 COALESCE(c.title,''), p.amount, p.method, COALESCE(p.transaction_id,''),
+		 COALESCE(c.title,''), p.batch_id, COALESCE(b.name,''), p.amount, p.method, COALESCE(p.transaction_id,''),
 		 COALESCE(p.sender_number,''), COALESCE(p.receiver_number,''), p.status,
 		 COALESCE(p.receipt_number,''), COALESCE(p.month,''), p.year,
 		 COALESCE(p.notes,''), p.verified_by, COALESCE(au.full_name,''),
@@ -579,6 +580,7 @@ func AdminGetPayments(c *gin.Context) {
 		 FROM payments p
 		 JOIN users u ON p.user_id = u.id
 		 LEFT JOIN courses c ON p.course_id = c.id
+		 LEFT JOIN batches b ON p.batch_id = b.id
 		 LEFT JOIN admin_users au ON p.verified_by = au.id`
 	args := []interface{}{}
 	conditions := []string{}
@@ -590,6 +592,10 @@ func AdminGetPayments(c *gin.Context) {
 	if userID != "" {
 		args = append(args, userID)
 		conditions = append(conditions, `p.user_id = $`+strconv.Itoa(len(args)))
+	}
+	if batchID != "" {
+		args = append(args, batchID)
+		conditions = append(conditions, `p.batch_id = $`+strconv.Itoa(len(args)))
 	}
 	if len(conditions) > 0 {
 		query += ` WHERE ` + strings.Join(conditions, " AND ")
@@ -606,9 +612,10 @@ func AdminGetPayments(c *gin.Context) {
 	var payments []models.Payment
 	for rows.Next() {
 		var p models.Payment
-		var enrollmentID, courseID, verifiedBy *int
+		var enrollmentID, courseID, batchIDVal, verifiedBy *int
+		var batchName string
 		if err := rows.Scan(&p.ID, &p.UserID, &p.UserName, &p.UserMobile, &enrollmentID,
-			&courseID, &p.CourseName, &p.Amount, &p.Method, &p.TransactionID,
+			&courseID, &p.CourseName, &batchIDVal, &batchName, &p.Amount, &p.Method, &p.TransactionID,
 			&p.SenderNumber, &p.ReceiverNumber, &p.Status, &p.ReceiptNumber,
 			&p.Month, &p.Year, &p.Notes, &verifiedBy, &p.VerifiedByName,
 			&p.VerifiedAt, &p.CreatedAt); err != nil {
@@ -620,6 +627,10 @@ func AdminGetPayments(c *gin.Context) {
 		if courseID != nil {
 			p.CourseID = *courseID
 		}
+		if batchIDVal != nil {
+			p.BatchID = *batchIDVal
+		}
+		p.BatchName = batchName
 		if verifiedBy != nil {
 			p.VerifiedBy = *verifiedBy
 		}
@@ -637,19 +648,23 @@ func AdminCreatePayment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+	if req.UserID == 0 {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "user_id is required"})
+		return
+	}
 
 	receiptNo := fmt.Sprintf("EDU-%d-%04d", time.Now().Unix()%100000, time.Now().UnixNano()%10000)
 
 	var p models.Payment
 	err := database.DB.QueryRow(context.Background(),
-		`INSERT INTO payments (user_id, enrollment_id, course_id, amount, method, transaction_id,
+		`INSERT INTO payments (user_id, enrollment_id, course_id, batch_id, amount, method, transaction_id,
 		 sender_number, receiver_number, receipt_number, month, year, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 RETURNING id, user_id, amount, method, transaction_id, receipt_number, month, year, status, created_at`,
-		req.UserID, req.EnrollmentID, req.CourseID, req.Amount, req.Method,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		 RETURNING id, user_id, batch_id, amount, method, transaction_id, receipt_number, month, year, status, created_at`,
+		req.UserID, req.EnrollmentID, req.CourseID, req.BatchID, req.Amount, req.Method,
 		req.TransactionID, req.SenderNumber, req.ReceiverNumber,
 		receiptNo, req.Month, req.Year, req.Notes,
-	).Scan(&p.ID, &p.UserID, &p.Amount, &p.Method, &p.TransactionID,
+	).Scan(&p.ID, &p.UserID, &p.BatchID, &p.Amount, &p.Method, &p.TransactionID,
 		&p.ReceiptNumber, &p.Month, &p.Year, &p.Status, &p.CreatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create payment"})

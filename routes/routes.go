@@ -44,6 +44,10 @@ func SetupRoutes(r *gin.Engine) {
 			auth.GET("/batches/:id/exams", handlers.UserGetBatchExams)
 			auth.GET("/batches/:id/leaderboard", handlers.UserGetBatchLeaderboard)
 			auth.GET("/batches/:id/my-results", handlers.UserGetBatchMyResults)
+			auth.GET("/batches/:id/students", handlers.UserGetBatchStudents)
+			auth.GET("/batches/:id/notices", handlers.UserGetBatchNotices)
+			auth.GET("/batches/:id/payments", handlers.UserGetBatchPayments)
+			auth.POST("/batches/:id/payments", handlers.UserPayBatchFee)
 			auth.GET("/user/dashboard", handlers.GetUserDashboardStats)
 			auth.GET("/user/free-courses", handlers.GetUserFreeCourses)
 			auth.POST("/device-token", handlers.RegisterDeviceToken)
@@ -242,6 +246,8 @@ func SetupRoutes(r *gin.Engine) {
 			// their own table, this just administers those accounts.
 			secured.GET("/teachers", handlers.AdminListTeachers)
 			secured.POST("/teachers", handlers.AdminCreateTeacher)
+			secured.GET("/teachers/:id", handlers.AdminGetTeacher)
+			secured.PUT("/teachers/:id", handlers.AdminUpdateTeacher)
 			secured.DELETE("/teachers/:id", handlers.AdminDeleteTeacher)
 			secured.PUT("/teachers/:id/reset-password", handlers.AdminResetTeacherPassword)
 

@@ -299,6 +299,61 @@ func AdminListTeachers(c *gin.Context) {
 	c.JSON(http.StatusOK, teachers)
 }
 
+func AdminGetTeacher(c *gin.Context) {
+	id := c.Param("id")
+
+	var t models.Teacher
+	err := database.DB.QueryRow(context.Background(),
+		`SELECT id, email, full_name, phone, education, bio, address, photo_url, join_date, leave_date, created_at, updated_at
+		 FROM teachers WHERE id = $1`, id,
+	).Scan(&t.ID, &t.Email, &t.FullName, &t.Phone, &t.Education, &t.Bio, &t.Address, &t.PhotoURL, &t.JoinDate, &t.LeaveDate, &t.CreatedAt, &t.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "teacher not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, t)
+}
+
+func AdminUpdateTeacher(c *gin.Context) {
+	id := c.Param("id")
+
+	var req models.AdminUpdateTeacherRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	var count int
+	_ = database.DB.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM teachers WHERE email = $1 AND id != $2`, req.Email, id,
+	).Scan(&count)
+	if count > 0 {
+		c.JSON(http.StatusConflict, models.ErrorResponse{Error: "email already taken"})
+		return
+	}
+
+	var t models.Teacher
+	err := database.DB.QueryRow(context.Background(),
+		`UPDATE teachers SET full_name=$1, email=$2, phone=$3, education=$4, bio=$5, address=$6, photo_url=$7, join_date=$8, leave_date=$9, updated_at=NOW()
+		 WHERE id=$10
+		 RETURNING id, email, full_name, phone, education, bio, address, photo_url, join_date, leave_date, created_at, updated_at`,
+		req.FullName, req.Email, req.Phone, req.Education, req.Bio, req.Address, req.PhotoURL, req.JoinDate, req.LeaveDate, id,
+	).Scan(&t.ID, &t.Email, &t.FullName, &t.Phone, &t.Education, &t.Bio, &t.Address, &t.PhotoURL, &t.JoinDate, &t.LeaveDate, &t.CreatedAt, &t.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "teacher not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update teacher"})
+		return
+	}
+	c.JSON(http.StatusOK, t)
+}
+
 func AdminCreateTeacher(c *gin.Context) {
 	var req models.CreateTeacherRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

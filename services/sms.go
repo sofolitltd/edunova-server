@@ -88,6 +88,27 @@ func SendSMS(mobile string, message string) error {
 		return fmt.Errorf("SMS API returned status %d", resp.StatusCode)
 	}
 
+	// BulkSMS BD always responds with HTTP 200, even on failure, and reports the
+	// real outcome in the JSON body via response_code (202 == submitted).
+	var result struct {
+		ResponseCode int    `json:"response_code"`
+		ErrorMessage string `json:"error_message"`
+		SuccessMsg   string `json:"success_message"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("[SMS] Failed to parse response for %s: %v (body: %s)", mobile, err, string(body))
+		return fmt.Errorf("SMS response parse failed: %w", err)
+	}
+
+	if result.ResponseCode != 202 {
+		errMsg := result.ErrorMessage
+		if errMsg == "" {
+			errMsg = string(body)
+		}
+		log.Printf("[SMS] API rejected message to %s (code %d): %s", mobile, result.ResponseCode, errMsg)
+		return fmt.Errorf("SMS failed (code %d): %s", result.ResponseCode, errMsg)
+	}
+
 	log.Printf("[SMS] Sent to %s (status %d): %s", mobile, resp.StatusCode, string(body))
 	return nil
 }

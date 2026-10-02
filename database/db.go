@@ -410,6 +410,21 @@ func runTeacherMigration() {
 	if err != nil {
 		log.Printf("Warning: failed to create teachers table: %v", err)
 	}
+
+	alters := []string{
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS phone VARCHAR(20) DEFAULT ''`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS education TEXT DEFAULT ''`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT ''`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS address TEXT DEFAULT ''`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS photo_url TEXT DEFAULT ''`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS join_date DATE`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS leave_date DATE`,
+	}
+	for _, q := range alters {
+		if _, err := DB.Exec(context.Background(), q); err != nil {
+			log.Printf("Warning: failed to alter teachers table: %v", err)
+		}
+	}
 }
 
 func runBatchTeacherMigration() {
@@ -1209,6 +1224,8 @@ func runPaymentsMigration() {
 	if err != nil {
 		log.Printf("Warning: failed to create payments table: %v", err)
 	}
+	_, _ = DB.Exec(ctx, `ALTER TABLE payments ADD COLUMN IF NOT EXISTS batch_id INT REFERENCES batches(id) ON DELETE SET NULL`)
+	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_payments_batch_id ON payments(batch_id)`)
 	fmt.Println("Payments migration completed")
 }
 

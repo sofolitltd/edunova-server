@@ -7,6 +7,13 @@ type Teacher struct {
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"-"`
 	FullName     string    `json:"full_name"`
+	Phone        string    `json:"phone"`
+	Education    string    `json:"education"`
+	Bio          string    `json:"bio"`
+	Address      string    `json:"address"`
+	PhotoURL     string    `json:"photo_url"`
+	JoinDate     *string   `json:"join_date"`
+	LeaveDate    *string   `json:"leave_date"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -30,6 +37,21 @@ type CreateTeacherRequest struct {
 type UpdateTeacherProfileRequest struct {
 	FullName string `json:"full_name" binding:"required,min=2"`
 	Email    string `json:"email" binding:"required,email"`
+}
+
+// AdminUpdateTeacherRequest is the admin-side full profile edit, distinct
+// from UpdateTeacherProfileRequest (the teacher's own self-service, which
+// only touches full_name/email).
+type AdminUpdateTeacherRequest struct {
+	FullName  string  `json:"full_name" binding:"required,min=2"`
+	Email     string  `json:"email" binding:"required,email"`
+	Phone     string  `json:"phone"`
+	Education string  `json:"education"`
+	Bio       string  `json:"bio"`
+	Address   string  `json:"address"`
+	PhotoURL  string  `json:"photo_url"`
+	JoinDate  *string `json:"join_date"`
+	LeaveDate *string `json:"leave_date"`
 }
 
 type ChangeTeacherPasswordRequest struct {

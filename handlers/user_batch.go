@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -303,4 +305,211 @@ func UserGetBatchMyResults(c *gin.Context) {
 		results = []myResult{}
 	}
 	c.JSON(http.StatusOK, results)
+}
+
+// UserGetBatchStudents returns the roster of approved students in a batch
+// the logged-in student is also enrolled in. Mobile numbers are withheld
+// for privacy — only name/student-id are shown to fellow students.
+func UserGetBatchStudents(c *gin.Context) {
+	mobile := c.GetString("mobile")
+	batchID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid batch id"})
+		return
+	}
+
+	ctx := context.Background()
+	if !userEnrolledInBatch(ctx, mobile, batchID) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not enrolled in this batch"})
+		return
+	}
+
+	rows, err := database.DB.Query(ctx,
+		`SELECT e.id, e.full_name, COALESCE(e.student_id, '')
+		 FROM enrollments e
+		 WHERE e.batch_id = $1 AND e.status = 'approved'
+		 ORDER BY e.full_name ASC`, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	type studentInfo struct {
+		ID        int    `json:"id"`
+		FullName  string `json:"full_name"`
+		StudentID string `json:"student_id"`
+	}
+	var students []studentInfo
+	for rows.Next() {
+		var s studentInfo
+		if err := rows.Scan(&s.ID, &s.FullName, &s.StudentID); err == nil {
+			students = append(students, s)
+		}
+	}
+	if students == nil {
+		students = []studentInfo{}
+	}
+	c.JSON(http.StatusOK, students)
+}
+
+// UserGetBatchNotices returns notices sent specifically to this batch.
+func UserGetBatchNotices(c *gin.Context) {
+	mobile := c.GetString("mobile")
+	userIDRaw, _ := c.Get("user_id")
+	userID, _ := userIDRaw.(int)
+	batchID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid batch id"})
+		return
+	}
+
+	ctx := context.Background()
+	if !userEnrolledInBatch(ctx, mobile, batchID) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not enrolled in this batch"})
+		return
+	}
+
+	rows, err := database.DB.Query(ctx,
+		`SELECT n.id, n.title, n.body, n.target, n.target_id, n.link_type, n.link_id, n.sent_at,
+		        CASE WHEN nr.id IS NOT NULL THEN TRUE ELSE FALSE END as read_by_me
+		 FROM notifications n
+		 LEFT JOIN notification_reads nr ON nr.notification_id = n.id AND nr.user_id = $1
+		 WHERE n.target = 'batch' AND n.target_id = $2
+		 ORDER BY n.sent_at DESC`, userID, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	var notices []models.NotificationWithRead
+	for rows.Next() {
+		var n models.NotificationWithRead
+		if err := rows.Scan(&n.ID, &n.Title, &n.Body, &n.Target, &n.TargetID,
+			&n.LinkType, &n.LinkID, &n.SentAt, &n.ReadByMe); err == nil {
+			notices = append(notices, n)
+		}
+	}
+	if notices == nil {
+		notices = []models.NotificationWithRead{}
+	}
+	c.JSON(http.StatusOK, notices)
+}
+
+// UserGetBatchPayments returns this batch's monthly fee amount plus the
+// logged-in student's own payment history for it.
+func UserGetBatchPayments(c *gin.Context) {
+	mobile := c.GetString("mobile")
+	userIDRaw, _ := c.Get("user_id")
+	userID, ok := userIDRaw.(int)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, models.ErrorResponse{Error: "user not found"})
+		return
+	}
+	batchID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid batch id"})
+		return
+	}
+
+	ctx := context.Background()
+	if !userEnrolledInBatch(ctx, mobile, batchID) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not enrolled in this batch"})
+		return
+	}
+
+	var monthlyFee int
+	_ = database.DB.QueryRow(ctx, `SELECT COALESCE(monthly_fee, 0) FROM batches WHERE id=$1`, batchID).Scan(&monthlyFee)
+
+	rows, err := database.DB.Query(ctx,
+		`SELECT id, amount, method, COALESCE(transaction_id,''), status, COALESCE(receipt_number,''),
+		        COALESCE(month,''), year, COALESCE(notes,''), created_at
+		 FROM payments
+		 WHERE user_id = $1 AND batch_id = $2
+		 ORDER BY year DESC, created_at DESC`, userID, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	type myPayment struct {
+		ID            int     `json:"id"`
+		Amount        float64 `json:"amount"`
+		Method        string  `json:"method"`
+		TransactionID string  `json:"transaction_id"`
+		Status        string  `json:"status"`
+		ReceiptNumber string  `json:"receipt_number"`
+		Month         string  `json:"month"`
+		Year          int     `json:"year"`
+		Notes         string  `json:"notes"`
+		CreatedAt     string  `json:"created_at"`
+	}
+	var payments []myPayment
+	for rows.Next() {
+		var p myPayment
+		var createdAt time.Time
+		if err := rows.Scan(&p.ID, &p.Amount, &p.Method, &p.TransactionID, &p.Status,
+			&p.ReceiptNumber, &p.Month, &p.Year, &p.Notes, &createdAt); err == nil {
+			p.CreatedAt = createdAt.Format("2006-01-02")
+			payments = append(payments, p)
+		}
+	}
+	if payments == nil {
+		payments = []myPayment{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"monthly_fee": monthlyFee,
+		"payments":    payments,
+	})
+}
+
+// UserPayBatchFee lets the logged-in student submit a monthly fee payment
+// for this batch (bKash/Nagad-style manual transfer). An admin verifies it
+// afterwards — this just records it as 'pending'.
+func UserPayBatchFee(c *gin.Context) {
+	mobile := c.GetString("mobile")
+	userIDRaw, _ := c.Get("user_id")
+	userID, ok := userIDRaw.(int)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, models.ErrorResponse{Error: "user not found"})
+		return
+	}
+	batchID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid batch id"})
+		return
+	}
+
+	ctx := context.Background()
+	if !userEnrolledInBatch(ctx, mobile, batchID) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not enrolled in this batch"})
+		return
+	}
+
+	var req models.CreatePaymentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	receiptNo := fmt.Sprintf("EDU-%d-%04d", time.Now().Unix()%100000, time.Now().UnixNano()%10000)
+
+	var p models.Payment
+	err = database.DB.QueryRow(ctx,
+		`INSERT INTO payments (user_id, batch_id, amount, method, transaction_id,
+		 sender_number, receiver_number, receipt_number, month, year, notes)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 RETURNING id, user_id, batch_id, amount, method, transaction_id, receipt_number, month, year, status, created_at`,
+		userID, batchID, req.Amount, req.Method, req.TransactionID,
+		req.SenderNumber, req.ReceiverNumber, receiptNo, req.Month, req.Year, req.Notes,
+	).Scan(&p.ID, &p.UserID, &p.BatchID, &p.Amount, &p.Method, &p.TransactionID,
+		&p.ReceiptNumber, &p.Month, &p.Year, &p.Status, &p.CreatedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to submit payment"})
+		return
+	}
+	c.JSON(http.StatusCreated, p)
 }

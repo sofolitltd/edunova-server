@@ -255,6 +255,8 @@ type Payment struct {
 	EnrollmentID   int        `json:"enrollment_id"`
 	CourseID       int        `json:"course_id"`
 	CourseName     string     `json:"course_name"`
+	BatchID        int        `json:"batch_id"`
+	BatchName      string     `json:"batch_name"`
 	Amount         float64    `json:"amount"`
 	Method         string     `json:"method"`
 	TransactionID  string     `json:"transaction_id"`
@@ -272,9 +274,10 @@ type Payment struct {
 }
 
 type CreatePaymentRequest struct {
-	UserID         int     `json:"user_id" binding:"required"`
+	UserID         int     `json:"user_id"`
 	EnrollmentID   int     `json:"enrollment_id"`
 	CourseID       int     `json:"course_id"`
+	BatchID        int     `json:"batch_id"`
 	Amount         float64 `json:"amount" binding:"required"`
 	Method         string  `json:"method" binding:"required"`
 	TransactionID  string  `json:"transaction_id"`
