@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,41 @@ import (
 
 	"edunova-server/config"
 )
+
+type SMSBalance struct {
+	Balance      float64 `json:"balance"`
+	IsSuccess    bool    `json:"is_success"`
+	StatusMsg    string  `json:"status_message"`
+	ResponseCode int     `json:"response_code"`
+}
+
+func GetSMSBalance() (*SMSBalance, error) {
+	apiKey := config.AppConfig.SMSAPIKey
+	if apiKey == "" {
+		return nil, fmt.Errorf("SMS API key not configured")
+	}
+
+	balanceURL := "https://bulksmsbd.net/api/getBalanceApi?api_key=" + url.QueryEscape(apiKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(balanceURL)
+	if err != nil {
+		return nil, fmt.Errorf("balance request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("balance response read failed: %w", err)
+	}
+
+	var balance SMSBalance
+	if err := json.Unmarshal(body, &balance); err != nil {
+		return nil, fmt.Errorf("balance response parse failed: %w", err)
+	}
+
+	return &balance, nil
+}
 
 func SendSMS(mobile string, message string) error {
 	apiKey := config.AppConfig.SMSAPIKey

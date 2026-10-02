@@ -81,7 +81,8 @@ func Login(c *gin.Context) {
 		 COALESCE(mother_name,''), COALESCE(mother_mobile,''),
 		 COALESCE(notification_mobile,''), COALESCE(gender,''),
 		 COALESCE(religion,''), COALESCE(student_class,''),
-		 COALESCE(shift,''), COALESCE(school,''), COALESCE(address,''),
+		 COALESCE(shift,''), COALESCE(school,''),
+		 COALESCE(present_address,''), COALESCE(permanent_address,''),
 		 created_at, updated_at
 		 FROM users WHERE mobile = $1`,
 		req.Mobile,
@@ -90,7 +91,7 @@ func Login(c *gin.Context) {
 		&user.MotherName, &user.MotherMobile,
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
-		&user.Shift, &user.School, &user.Address,
+		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
 		&user.CreatedAt, &user.UpdatedAt)
 
 	if err == pgx.ErrNoRows {
@@ -130,7 +131,8 @@ func GetUser(c *gin.Context) {
 		 COALESCE(mother_name,''), COALESCE(mother_mobile,''),
 		 COALESCE(notification_mobile,''), COALESCE(gender,''),
 		 COALESCE(religion,''), COALESCE(student_class,''),
-		 COALESCE(shift,''), COALESCE(school,''), COALESCE(address,''),
+		 COALESCE(shift,''), COALESCE(school,''),
+		 COALESCE(present_address,''), COALESCE(permanent_address,''),
 		 created_at, updated_at
 		 FROM users WHERE mobile = $1`,
 		mobile,
@@ -139,7 +141,7 @@ func GetUser(c *gin.Context) {
 		&user.MotherName, &user.MotherMobile,
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
-		&user.Shift, &user.School, &user.Address,
+		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
 		&user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
@@ -209,24 +211,25 @@ func UpdateUserProfile(c *gin.Context) {
 		`UPDATE users SET full_name=$1, father_name=$2, father_mobile=$3,
 		 mother_name=$4, mother_mobile=$5, notification_mobile=$6,
 		 gender=$7, religion=$8, student_class=$9, shift=$10,
-		 school=$11, address=$12, updated_at=NOW() WHERE mobile=$13
+		 school=$11, present_address=$12, permanent_address=$13, updated_at=NOW() WHERE mobile=$14
 		 RETURNING id, full_name, mobile, verified,
 		 COALESCE(father_name,''), COALESCE(father_mobile,''),
 		 COALESCE(mother_name,''), COALESCE(mother_mobile,''),
 		 COALESCE(notification_mobile,''), COALESCE(gender,''),
 		 COALESCE(religion,''), COALESCE(student_class,''),
-		 COALESCE(shift,''), COALESCE(school,''), COALESCE(address,''),
+		 COALESCE(shift,''), COALESCE(school,''),
+		 COALESCE(present_address,''), COALESCE(permanent_address,''),
 		 created_at, updated_at`,
 		req.FullName, req.FatherName, req.FatherMobile,
 		req.MotherName, req.MotherMobile, req.NotificationMobile,
 		req.Gender, req.Religion, req.StudentClass, req.Shift,
-		req.School, req.Address, mobile,
+		req.School, req.PresentAddress, req.PermanentAddress, mobile,
 	).Scan(&user.ID, &user.FullName, &user.Mobile, &user.Verified,
 		&user.FatherName, &user.FatherMobile,
 		&user.MotherName, &user.MotherMobile,
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
-		&user.Shift, &user.School, &user.Address,
+		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
 		&user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update profile"})
@@ -402,7 +405,8 @@ func OTPLoginVerify(c *gin.Context) {
 		 COALESCE(mother_name,''), COALESCE(mother_mobile,''),
 		 COALESCE(notification_mobile,''), COALESCE(gender,''),
 		 COALESCE(religion,''), COALESCE(student_class,''),
-		 COALESCE(shift,''), COALESCE(school,''), COALESCE(address,''),
+		 COALESCE(shift,''), COALESCE(school,''),
+		 COALESCE(present_address,''), COALESCE(permanent_address,''),
 		 created_at, updated_at
 		 FROM users WHERE mobile=$1`, req.Mobile,
 	).Scan(&user.ID, &user.FullName, &user.Mobile, &user.Verified,
@@ -410,7 +414,7 @@ func OTPLoginVerify(c *gin.Context) {
 		&user.MotherName, &user.MotherMobile,
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
-		&user.Shift, &user.School, &user.Address,
+		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
 		&user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {

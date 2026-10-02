@@ -20,7 +20,8 @@ type User struct {
 	StudentClass       string    `json:"student_class"`
 	Shift              string    `json:"shift"`
 	School             string    `json:"school"`
-	Address            string    `json:"address"`
+	PresentAddress     string    `json:"present_address"`
+	PermanentAddress   string    `json:"permanent_address"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -93,7 +94,8 @@ type UpdateUserProfileRequest struct {
 	StudentClass       string `json:"student_class" binding:"omitempty,oneof=3 4 5 6 7 8"`
 	Shift              string `json:"shift"`
 	School             string `json:"school"`
-	Address            string `json:"address"`
+	PresentAddress     string `json:"present_address"`
+	PermanentAddress   string `json:"permanent_address"`
 }
 
 type Attendance struct {

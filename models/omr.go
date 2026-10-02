@@ -7,12 +7,58 @@ type OMRQuestionPayload struct {
 	CorrectOption  int `json:"correct_option" binding:"required,min=1,max=4"`
 }
 
-type CreateOMRExamRequest struct {
-	Title      string               `json:"title" binding:"required"`
-	ClassLevel string               `json:"class_level"`
-	Subject    string               `json:"subject"`
-	Columns    int                  `json:"columns"`
-	Questions  []OMRQuestionPayload `json:"questions" binding:"required,min=1"`
+// CreateOMRDesignRequest defines a reusable OMR sheet layout — the "OMR" in
+// the admin UI's Create page. It has no answer key or roster; those belong
+// to the tokens created from it.
+type CreateOMRDesignRequest struct {
+	Title         string `json:"title" binding:"required"`
+	ClassLevel    string `json:"class_level"`
+	Subject       string `json:"subject"`
+	Columns       int    `json:"columns"`
+	QuestionCount int    `json:"question_count" binding:"required,min=1"`
+}
+
+// UpdateOMRDesignRequest edits a design's layout. It doesn't touch any
+// token already created from it — those keep their own copied layout.
+type UpdateOMRDesignRequest struct {
+	Title         string `json:"title" binding:"required"`
+	ClassLevel    string `json:"class_level"`
+	Subject       string `json:"subject"`
+	Columns       int    `json:"columns"`
+	QuestionCount int    `json:"question_count" binding:"required,min=1"`
+}
+
+type OMRDesign struct {
+	ID            int       `json:"id"`
+	Title         string    `json:"title"`
+	ClassLevel    string    `json:"class_level"`
+	Subject       string    `json:"subject"`
+	QuestionCount int       `json:"question_count"`
+	Columns       int       `json:"columns"`
+	TokenCount    int       `json:"token_count"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// CreateOMRTokenRequest creates one exam instance ("token") from an
+// already-created OMRDesign. Its answer key and roster are set afterward,
+// on the token's own detail page.
+type CreateOMRTokenRequest struct {
+	Title       string `json:"title" binding:"required"`
+	OMRDesignID int    `json:"omr_design_id" binding:"required"`
+}
+
+// UpdateOMRAnswerKeyRequest sets (or replaces) a token's answer key. Every
+// question number from 1 to the token's question count must be included.
+type UpdateOMRAnswerKeyRequest struct {
+	Questions []OMRQuestionPayload `json:"questions" binding:"required,min=1"`
+}
+
+// UpdateOMRTokenRequest renames a token. Its layout (question count/columns)
+// came from its design at creation time and isn't editable here — changing
+// it would orphan the answer key and any sheets already scored against it.
+type UpdateOMRTokenRequest struct {
+	Title string `json:"title" binding:"required"`
 }
 
 type OMRExam struct {
@@ -23,6 +69,8 @@ type OMRExam struct {
 	QuestionCount int       `json:"question_count"`
 	Columns       int       `json:"columns"`
 	ExamCode      string    `json:"exam_code"`
+	OMRDesignID   *int      `json:"omr_design_id"`
+	AnswerKeySet  bool      `json:"answer_key_set"`
 	StudentCount  int       `json:"student_count"`
 	SheetCount    int       `json:"sheet_count"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -30,10 +78,10 @@ type OMRExam struct {
 }
 
 type OMRQuestion struct {
-	ID             int `json:"id"`
-	OMRExamID      int `json:"omr_exam_id"`
-	QuestionNumber int `json:"question_number"`
-	CorrectOption  int `json:"correct_option"`
+	ID             int  `json:"id"`
+	OMRExamID      int  `json:"omr_exam_id"`
+	QuestionNumber int  `json:"question_number"`
+	CorrectOption  *int `json:"correct_option"`
 }
 
 type OMRStudentPayload struct {
@@ -66,9 +114,12 @@ type OMRQuestionOutcome struct {
 }
 
 type OMRSheet struct {
-	ID                 int                  `json:"id"`
-	OMRExamID          int                  `json:"omr_exam_id"`
-	ImagePath          string               `json:"image_path"`
+	ID        int `json:"id"`
+	OMRExamID int `json:"omr_exam_id"`
+	// AnnotatedPreview is a data: URL of the marked-up sheet, generated in
+	// memory and set only on the upload response — nothing about the sheet's
+	// image is stored, so this is empty on every later read (list/get).
+	AnnotatedPreview   string               `json:"annotated_preview,omitempty"`
 	DetectedRollNumber string               `json:"detected_roll_number"`
 	MatchedStudentID   *int                 `json:"matched_student_id"`
 	MatchedStudentName string               `json:"matched_student_name,omitempty"`

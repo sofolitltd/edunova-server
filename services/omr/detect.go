@@ -31,6 +31,8 @@ const (
 type BubbleResult struct {
 	Value     int // Option (1-4) or digit-value (0-9), matching the source bubble
 	FillRatio float64
+	PixelX    float64 // bubble center in the source photo's pixel space, for drawing an annotated overlay
+	PixelY    float64
 }
 
 // QuestionResult is the decoded outcome for one question.
@@ -55,6 +57,7 @@ type DetectionResult struct {
 	ExamCode          string
 	ExamCodeAmbiguous bool
 	Questions         []QuestionResult
+	BubbleRadiusPx    float64 // for drawing an annotated overlay at the same scale used to read fill ratios
 }
 
 // DecodeImage reads a JPEG or PNG from r.
@@ -90,7 +93,7 @@ func Detect(img image.Image, t Template) (DetectionResult, error) {
 		bubbleRadiusPx = 2
 	}
 
-	result := DetectionResult{}
+	result := DetectionResult{BubbleRadiusPx: bubbleRadiusPx}
 
 	rollDigits := decodeDigitGrid(gray, h, t.RollBubbles, rollDigitCount, bubbleRadiusPx)
 	result.RollNumber, result.RollAmbiguous = digitsToString(rollDigits)
@@ -136,7 +139,7 @@ func findMarkers(gray *image.Gray, t Template) ([4]Point, error) {
 
 	var out [4]Point
 	for i, q := range quadrants {
-		cx, cy, count, err := largestDarkBlobCentroid(gray, q)
+		cx, cy, count, err := bestMarkerBlobCentroid(gray, q)
 		if err != nil || count < 20 {
 			return out, fmt.Errorf("omr: could not find a corner marker (%d/4 found) — retake the photo with all 4 corners visible and well lit", i)
 		}
@@ -145,13 +148,16 @@ func findMarkers(gray *image.Gray, t Template) ([4]Point, error) {
 	return out, nil
 }
 
-// largestDarkBlobCentroid finds the largest 4-connected component of
-// pixels darker than darkThreshold within rect and returns its centroid
-// (in pixel coordinates) and pixel count. The fiducial marker is a large
-// solid square, so it dominates any nearby dark content (bubble fills,
-// stray marks) as long as those are picked by size rather than lumped
-// together with a whole-region centroid.
-func largestDarkBlobCentroid(gray *image.Gray, rect image.Rectangle) (float64, float64, int, error) {
+// bestMarkerBlobCentroid finds every 4-connected component of pixels darker
+// than darkThreshold within rect and returns the centroid (in pixel
+// coordinates) and pixel count of whichever one looks most like the fiducial
+// marker: a large, roughly square solid blob. Picking purely by pixel count
+// (the previous approach) could instead lock onto a wide table border or a
+// dense run of header text inside the search quadrant — content that's
+// often larger in area than the marker but is long and thin rather than
+// square — which would offset the whole homography and shift every decoded
+// bubble position sideways.
+func bestMarkerBlobCentroid(gray *image.Gray, rect image.Rectangle) (float64, float64, int, error) {
 	w, h := rect.Dx(), rect.Dy()
 	if w <= 0 || h <= 0 {
 		return 0, 0, 0, fmt.Errorf("empty search region")
@@ -159,8 +165,13 @@ func largestDarkBlobCentroid(gray *image.Gray, rect image.Rectangle) (float64, f
 	visited := make([]bool, w*h)
 	idx := func(x, y int) int { return (y-rect.Min.Y)*w + (x - rect.Min.X) }
 
-	bestCount := 0
-	var bestSumX, bestSumY float64
+	type blob struct {
+		count                  int
+		sumX, sumY             float64
+		minX, minY, maxX, maxY int
+	}
+	var best blob
+	bestScore := -1.0
 
 	type pt struct{ x, y int }
 	queue := make([]pt, 0, 256)
@@ -174,14 +185,25 @@ func largestDarkBlobCentroid(gray *image.Gray, rect image.Rectangle) (float64, f
 			queue = queue[:0]
 			queue = append(queue, pt{x, y})
 			visited[idx(x, y)] = true
-			count := 0
-			var sumX, sumY float64
+			cur := blob{minX: x, minY: y, maxX: x, maxY: y}
 			for len(queue) > 0 {
 				p := queue[len(queue)-1]
 				queue = queue[:len(queue)-1]
-				count++
-				sumX += float64(p.x)
-				sumY += float64(p.y)
+				cur.count++
+				cur.sumX += float64(p.x)
+				cur.sumY += float64(p.y)
+				if p.x < cur.minX {
+					cur.minX = p.x
+				}
+				if p.x > cur.maxX {
+					cur.maxX = p.x
+				}
+				if p.y < cur.minY {
+					cur.minY = p.y
+				}
+				if p.y > cur.maxY {
+					cur.maxY = p.y
+				}
 				neighbors := [4]pt{{p.x - 1, p.y}, {p.x + 1, p.y}, {p.x, p.y - 1}, {p.x, p.y + 1}}
 				for _, n := range neighbors {
 					if n.x < rect.Min.X || n.x >= rect.Max.X || n.y < rect.Min.Y || n.y >= rect.Max.Y {
@@ -197,16 +219,30 @@ func largestDarkBlobCentroid(gray *image.Gray, rect image.Rectangle) (float64, f
 					queue = append(queue, n)
 				}
 			}
-			if count > bestCount {
-				bestCount = count
-				bestSumX, bestSumY = sumX, sumY
+			if cur.count < 20 {
+				continue
+			}
+			boxW := float64(cur.maxX-cur.minX) + 1
+			boxH := float64(cur.maxY-cur.minY) + 1
+			squareness := boxW / boxH
+			if squareness > 1 {
+				squareness = 1 / squareness
+			}
+			// A solid square marker also fills most of its own bounding
+			// box; a diagonal scribble or a diffuse cluster of nearby small
+			// marks would not, so weigh fill density in as well.
+			fill := float64(cur.count) / (boxW * boxH)
+			score := float64(cur.count) * squareness * squareness * fill
+			if score > bestScore {
+				bestScore = score
+				best = cur
 			}
 		}
 	}
-	if bestCount == 0 {
+	if best.count == 0 {
 		return 0, 0, 0, fmt.Errorf("no dark pixels found")
 	}
-	return bestSumX / float64(bestCount), bestSumY / float64(bestCount), bestCount, nil
+	return best.sumX / float64(best.count), best.sumY / float64(best.count), best.count, nil
 }
 
 // pixelsPerMM estimates the photo's scale from the average of the 4
@@ -340,7 +376,7 @@ func decodeQuestions(gray *image.Gray, h Homography, bubbles []QuestionBubble, b
 		for _, bub := range opts {
 			px, py := h.Apply(bub.Center)
 			fill := fillRatioAt(gray, px, py, bubbleRadiusPx)
-			qr.Options = append(qr.Options, BubbleResult{Value: bub.Option, FillRatio: fill})
+			qr.Options = append(qr.Options, BubbleResult{Value: bub.Option, FillRatio: fill, PixelX: px, PixelY: py})
 			if fill > bestFill {
 				second, secondFill = best, bestFill
 				best, bestFill = bub.Option, fill

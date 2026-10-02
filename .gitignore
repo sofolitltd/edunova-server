@@ -3,3 +3,4 @@ edunova-server
 serviceAccountKey.json
 .vercel
 .env*
+uploads/

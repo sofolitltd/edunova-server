@@ -10,6 +10,7 @@ import (
 
 	"edunova-server/database"
 	"edunova-server/models"
+	"edunova-server/services"
 )
 
 func AdminGetFinanceStats(c *gin.Context) {
@@ -301,6 +302,15 @@ func AdminUpdateExpense(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, e)
+}
+
+func AdminGetSMSBalance(c *gin.Context) {
+	balance, err := services.GetSMSBalance()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, balance)
 }
 
 func AdminDeleteExpense(c *gin.Context) {

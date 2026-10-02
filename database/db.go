@@ -67,6 +67,7 @@ func runMigrations() {
 	runQuestionBankMigration()
 	runClassBackfillMigration()
 	runFinanceMigration()
+	runSMSMigration()
 	runBatchMigration()
 	runAttendanceMigration()
 	runDoubtTrackerMigration()
@@ -86,6 +87,8 @@ func runMigrations() {
 	runBatchTeacherMigration()
 	runBatchSubjectMigration()
 	runOMRMigration()
+	runOMRDesignMigration()
+	runPromoCodeMigration()
 	seedAdminUser()
 	seedDemoHierarchy()
 	seedDemoExpenses()
@@ -201,6 +204,7 @@ func runCourseMigration() {
 		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS enrolled_by VARCHAR(20) NOT NULL DEFAULT 'self'`,
 		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS batch_id INT REFERENCES batches(id) ON DELETE SET NULL`,
 		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS student_id VARCHAR(30) NOT NULL DEFAULT ''`,
+		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(100) DEFAULT ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_student_id ON enrollments (student_id) WHERE student_id <> ''`,
 	}
 
@@ -935,6 +939,23 @@ func seedDemoExpenses() {
 	fmt.Printf("Seeded %d demo expenses\n", len(expenses))
 }
 
+func runSMSMigration() {
+	query := `
+	CREATE TABLE IF NOT EXISTS sms_templates (
+		id SERIAL PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		body TEXT NOT NULL,
+		created_by INT REFERENCES admin_users(id),
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	);
+	`
+	_, err := DB.Exec(context.Background(), query)
+	if err != nil {
+		log.Printf("Failed to run SMS migration: %v", err)
+	}
+}
+
 func runBatchMigration() {
 	query := `
 	CREATE TABLE IF NOT EXISTS batches (
@@ -1034,12 +1055,19 @@ func runAttendanceMigration() {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS shift VARCHAR(20) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS school VARCHAR(255) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS present_address TEXT DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS permanent_address TEXT DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255) DEFAULT ''`,
 	}
 	for _, q := range userAlters {
 		_, _ = DB.Exec(ctx, q)
 	}
+
+	// Carry forward any address already captured under the old single-field
+	// column so existing users aren't bounced back into profile setup.
+	_, _ = DB.Exec(ctx, `UPDATE users SET present_address = address, permanent_address = address
+		WHERE present_address = '' AND address <> ''`)
 
 	// Create attendance table
 	_, err := DB.Exec(ctx, `
@@ -2576,7 +2604,6 @@ func runOMRMigration() {
 	CREATE TABLE IF NOT EXISTS omr_sheets (
 		id SERIAL PRIMARY KEY,
 		omr_exam_id INT REFERENCES omr_exams(id) ON DELETE CASCADE,
-		image_path VARCHAR(500) NOT NULL,
 		detected_roll_number VARCHAR(10) DEFAULT '',
 		matched_student_id INT REFERENCES omr_students(id) ON DELETE SET NULL,
 		status VARCHAR(20) NOT NULL DEFAULT 'needs_review',
@@ -2607,5 +2634,92 @@ func runOMRMigration() {
 		log.Printf("Warning: failed to add omr_sheets.student_result_id: %v", err)
 	}
 
+	// Sheet photos are never stored (scoring only persists the result), so
+	// image_path — required on tables created before this — must stop being
+	// mandatory. Existing rows/columns are left alone; new inserts just omit it.
+	_, err = DB.Exec(ctx, `ALTER TABLE omr_sheets ALTER COLUMN image_path DROP NOT NULL`)
+	if err != nil {
+		log.Printf("Warning: failed to relax omr_sheets.image_path: %v", err)
+	}
+
 	fmt.Println("OMR migration completed")
+}
+
+func runPromoCodeMigration() {
+	ctx := context.Background()
+	_, err := DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS promo_codes (
+		id SERIAL PRIMARY KEY,
+		code VARCHAR(50) UNIQUE NOT NULL,
+		discount_type VARCHAR(20) NOT NULL,
+		discount_value INT NOT NULL,
+		course_id INT REFERENCES courses(id) ON DELETE SET NULL,
+		batch_id INT REFERENCES batches(id) ON DELETE SET NULL,
+		max_redemptions INT,
+		redemption_count INT NOT NULL DEFAULT 0,
+		expires_at TIMESTAMP WITH TIME ZONE,
+		is_active BOOLEAN NOT NULL DEFAULT TRUE,
+		created_by INT REFERENCES admin_users(id),
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create promo_codes table: %v", err)
+	}
+
+	_, err = DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS promo_code_redemptions (
+		id SERIAL PRIMARY KEY,
+		promo_code_id INT NOT NULL REFERENCES promo_codes(id) ON DELETE CASCADE,
+		enrollment_id INT REFERENCES enrollments(id) ON DELETE SET NULL,
+		mobile VARCHAR(20) NOT NULL,
+		discount_amount INT NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create promo_code_redemptions table: %v", err)
+	}
+
+	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_promo_redemptions_code ON promo_code_redemptions(promo_code_id)`)
+	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_promo_redemptions_mobile ON promo_code_redemptions(mobile)`)
+}
+
+// runOMRDesignMigration adds the reusable "OMR design" (sheet layout: title,
+// class, subject, question count, columns) that a token (an omr_exams row)
+// is created from. A design has no answer key or roster of its own — those
+// stay per-token, so the same design can be reused across several tokens
+// (e.g. parallel exam sets) without cloning its layout by hand.
+func runOMRDesignMigration() {
+	ctx := context.Background()
+	_, err := DB.Exec(ctx, `
+	CREATE TABLE IF NOT EXISTS omr_designs (
+		id SERIAL PRIMARY KEY,
+		title VARCHAR(255) NOT NULL,
+		class_level VARCHAR(50) DEFAULT '',
+		subject VARCHAR(100) DEFAULT '',
+		question_count INT NOT NULL,
+		columns INT NOT NULL DEFAULT 2,
+		created_by INT REFERENCES admin_users(id) ON DELETE SET NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create omr_designs table: %v", err)
+	}
+
+	// Each token (omr_exams row) now originates from a design instead of
+	// carrying its own answer key at creation time.
+	_, err = DB.Exec(ctx, `ALTER TABLE omr_exams ADD COLUMN IF NOT EXISTS omr_design_id INT REFERENCES omr_designs(id) ON DELETE SET NULL`)
+	if err != nil {
+		log.Printf("Warning: failed to add omr_exams.omr_design_id: %v", err)
+	}
+
+	// A token's question rows are now pre-created (one per question number,
+	// correct_option unset) at token-creation time, then filled in later on
+	// the token's detail page — so correct_option must allow NULL until then.
+	_, err = DB.Exec(ctx, `ALTER TABLE omr_questions ALTER COLUMN correct_option DROP NOT NULL`)
+	if err != nil {
+		log.Printf("Warning: failed to relax omr_questions.correct_option: %v", err)
+	}
+
+	fmt.Println("OMR design migration completed")
 }

@@ -17,6 +17,7 @@ import (
 	"edunova-server/database"
 	"edunova-server/middleware"
 	"edunova-server/models"
+	"edunova-server/services"
 )
 
 func AdminLogin(c *gin.Context) {
@@ -293,14 +294,14 @@ func AdminGetUserByID(c *gin.Context) {
 		 COALESCE(mother_name,''), COALESCE(mother_mobile,''),
 		 COALESCE(notification_mobile,''), COALESCE(gender,''), COALESCE(religion,''),
 		 COALESCE(student_class,''), COALESCE(shift,''), COALESCE(school,''),
-		 COALESCE(address,''), created_at, updated_at
+		 COALESCE(present_address,''), COALESCE(permanent_address,''), created_at, updated_at
 		 FROM users WHERE id = $1`,
 		id,
 	).Scan(&u.ID, &u.FullName, &u.Mobile, &u.Verified,
 		&u.FatherName, &u.FatherMobile, &u.MotherName, &u.MotherMobile,
 		&u.NotificationMobile, &u.Gender, &u.Religion,
 		&u.StudentClass, &u.Shift, &u.School,
-		&u.Address, &u.CreatedAt, &u.UpdatedAt)
+		&u.PresentAddress, &u.PermanentAddress, &u.CreatedAt, &u.UpdatedAt)
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "user not found"})
@@ -875,22 +876,46 @@ func PublicCreateEnrollment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+	if req.CourseID == 0 && req.BatchID == nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "course_id or batch_id is required"})
+		return
+	}
 
 	if req.PaymentMethod == "" {
 		req.PaymentMethod = "manual"
 	}
 
+	ctx := context.Background()
+	tx, err := database.DB.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	finalAmount := req.Amount
+	var promoID int
+	if strings.TrimSpace(req.PromoCode) != "" {
+		var discount int
+		promoID, discount, err = applyPromoCode(ctx, tx, req.PromoCode, req.Mobile, req.CourseID, req.BatchID, req.Amount)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+			return
+		}
+		finalAmount = req.Amount - discount
+	}
+
 	var enrollment models.Enrollment
-	err := database.DB.QueryRow(
-		context.Background(),
-		`INSERT INTO enrollments (course_id, full_name, mobile, payment_method, mobile_banking, amount, sent_from, sent_to, referral_source)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id, course_id, full_name, mobile, payment_method, mobile_banking, amount, sent_from, sent_to, referral_source, status, created_at, updated_at`,
-		req.CourseID, req.FullName, req.Mobile, req.PaymentMethod, req.MobileBanking,
-		req.Amount, req.SentFrom, req.SentTo, req.ReferralSource,
-	).Scan(&enrollment.ID, &enrollment.CourseID, &enrollment.FullName, &enrollment.Mobile,
+	err = tx.QueryRow(
+		ctx,
+		`INSERT INTO enrollments (course_id, batch_id, full_name, mobile, payment_method, mobile_banking, amount, sent_from, sent_to, transaction_id, referral_source)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 RETURNING id, COALESCE(course_id, 0), batch_id, full_name, mobile, payment_method, mobile_banking, amount, sent_from, sent_to, transaction_id, referral_source, status, created_at, updated_at`,
+		nullableCourseID(req.CourseID), req.BatchID, req.FullName, req.Mobile, req.PaymentMethod, req.MobileBanking,
+		finalAmount, req.SentFrom, req.SentTo, req.TransactionID, req.ReferralSource,
+	).Scan(&enrollment.ID, &enrollment.CourseID, &enrollment.BatchID, &enrollment.FullName, &enrollment.Mobile,
 		&enrollment.PaymentMethod, &enrollment.MobileBanking, &enrollment.Amount,
-		&enrollment.SentFrom, &enrollment.SentTo, &enrollment.ReferralSource,
+		&enrollment.SentFrom, &enrollment.SentTo, &enrollment.TransactionID, &enrollment.ReferralSource,
 		&enrollment.Status, &enrollment.CreatedAt, &enrollment.UpdatedAt)
 
 	if err != nil {
@@ -898,7 +923,32 @@ func PublicCreateEnrollment(c *gin.Context) {
 		return
 	}
 
-	_ = database.DB.QueryRow(context.Background(), `SELECT title FROM courses WHERE id = $1`, req.CourseID).Scan(&enrollment.CourseName)
+	if promoID != 0 {
+		discount := req.Amount - finalAmount
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO promo_code_redemptions (promo_code_id, enrollment_id, mobile, discount_amount) VALUES ($1, $2, $3, $4)`,
+			promoID, enrollment.ID, req.Mobile, discount,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to record promo redemption"})
+			return
+		}
+		if _, err := tx.Exec(ctx, `UPDATE promo_codes SET redemption_count = redemption_count + 1 WHERE id = $1`, promoID); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update promo code"})
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create enrollment"})
+		return
+	}
+
+	if req.CourseID != 0 {
+		_ = database.DB.QueryRow(context.Background(), `SELECT title FROM courses WHERE id = $1`, req.CourseID).Scan(&enrollment.CourseName)
+	}
+	if enrollment.BatchID != nil {
+		_ = database.DB.QueryRow(context.Background(), `SELECT name FROM batches WHERE id = $1`, *enrollment.BatchID).Scan(&enrollment.BatchName)
+	}
 
 	c.JSON(http.StatusCreated, enrollment)
 }
@@ -962,7 +1012,7 @@ func AdminGetEnrollments(c *gin.Context) {
 	rows, err := database.DB.Query(
 		context.Background(),
 		`SELECT e.id, COALESCE(e.course_id, 0), COALESCE(c.title,''), COALESCE(c.type,'online'), e.full_name, e.mobile, e.user_id, e.payment_method,
-			e.mobile_banking, e.amount, e.sent_from, e.sent_to, e.referral_source, e.status, e.enrolled_by, e.batch_id, COALESCE(b.name,''), e.created_at, e.updated_at
+			e.mobile_banking, e.amount, e.sent_from, e.sent_to, e.transaction_id, e.referral_source, e.status, e.enrolled_by, e.batch_id, COALESCE(b.name,''), e.created_at, e.updated_at
 		 `+baseQuery+` LEFT JOIN batches b ON e.batch_id = b.id`+whereClause+` ORDER BY e.created_at DESC LIMIT $`+strconv.Itoa(argIdx)+` OFFSET $`+strconv.Itoa(argIdx+1),
 		queryArgs...,
 	)
@@ -975,7 +1025,7 @@ func AdminGetEnrollments(c *gin.Context) {
 	for rows.Next() {
 		var en models.Enrollment
 		_ = rows.Scan(&en.ID, &en.CourseID, &en.CourseName, &en.CourseType, &en.FullName, &en.Mobile, &en.UserID,
-			&en.PaymentMethod, &en.MobileBanking, &en.Amount, &en.SentFrom, &en.SentTo,
+			&en.PaymentMethod, &en.MobileBanking, &en.Amount, &en.SentFrom, &en.SentTo, &en.TransactionID,
 			&en.ReferralSource, &en.Status, &en.EnrolledBy, &en.BatchID, &en.BatchName, &en.CreatedAt, &en.UpdatedAt)
 		enrollments = append(enrollments, en)
 	}
@@ -1001,14 +1051,15 @@ func AdminUpdateEnrollmentStatus(c *gin.Context) {
 		return
 	}
 
+	ctx := context.Background()
 	var enrollment models.Enrollment
 	err := database.DB.QueryRow(
-		context.Background(),
+		ctx,
 		`UPDATE enrollments SET status = $1, updated_at = NOW()
 		 WHERE id = $2
-		 RETURNING id, course_id, full_name, mobile, payment_method, mobile_banking, amount, sent_from, sent_to, referral_source, status, created_at, updated_at`,
+		 RETURNING id, COALESCE(course_id, 0), full_name, mobile, user_id, payment_method, mobile_banking, amount, sent_from, sent_to, referral_source, status, created_at, updated_at`,
 		req.Status, id,
-	).Scan(&enrollment.ID, &enrollment.CourseID, &enrollment.FullName, &enrollment.Mobile,
+	).Scan(&enrollment.ID, &enrollment.CourseID, &enrollment.FullName, &enrollment.Mobile, &enrollment.UserID,
 		&enrollment.PaymentMethod, &enrollment.MobileBanking, &enrollment.Amount,
 		&enrollment.SentFrom, &enrollment.SentTo, &enrollment.ReferralSource,
 		&enrollment.Status, &enrollment.CreatedAt, &enrollment.UpdatedAt)
@@ -1022,9 +1073,61 @@ func AdminUpdateEnrollmentStatus(c *gin.Context) {
 		return
 	}
 
-	_ = database.DB.QueryRow(context.Background(), `SELECT title FROM courses WHERE id = $1`, enrollment.CourseID).Scan(&enrollment.CourseName)
+	_ = database.DB.QueryRow(ctx, `SELECT title FROM courses WHERE id = $1`, enrollment.CourseID).Scan(&enrollment.CourseName)
+
+	notifyEnrollmentStatusChanged(ctx, enrollment, c.GetInt("admin_id"))
 
 	c.JSON(http.StatusOK, enrollment)
+}
+
+// notifyEnrollmentStatusChanged pushes an FCM notification (and records it in
+// notification history) to the student whenever their enrollment's status
+// changes — approved, rejected, or reverted back to pending. Enrollments
+// created through the public self-enroll flow don't carry user_id, so it
+// falls back to matching the enrollment's mobile against users.mobile. It's
+// a no-op (not an error) when no account match exists, since staff can act
+// on an enrollment before the student ever registers.
+func notifyEnrollmentStatusChanged(ctx context.Context, enrollment models.Enrollment, adminID int) {
+	userID := 0
+	if enrollment.UserID != nil {
+		userID = *enrollment.UserID
+	} else {
+		_ = database.DB.QueryRow(ctx, `SELECT id FROM users WHERE mobile = $1`, enrollment.Mobile).Scan(&userID)
+	}
+	if userID == 0 {
+		return
+	}
+
+	courseName := enrollment.CourseName
+	if courseName == "" {
+		courseName = "আপনার কোর্স"
+	}
+
+	var title, body string
+	switch enrollment.Status {
+	case "approved":
+		title = "এনরোলমেন্ট অনুমোদিত হয়েছে"
+		body = fmt.Sprintf("%s কোর্সে আপনার এনরোলমেন্ট অনুমোদন করা হয়েছে। এখনই শুরু করুন!", courseName)
+	case "rejected":
+		title = "এনরোলমেন্ট বাতিল করা হয়েছে"
+		body = fmt.Sprintf("%s কোর্সে আপনার এনরোলমেন্ট বাতিল করা হয়েছে। বিস্তারিত জানতে সাপোর্টের সাথে যোগাযোগ করুন।", courseName)
+	case "pending":
+		title = "এনরোলমেন্ট পুনরায় পর্যালোচনায়"
+		body = fmt.Sprintf("%s কোর্সে আপনার এনরোলমেন্ট আবার পর্যালোচনা করা হচ্ছে।", courseName)
+	default:
+		return
+	}
+	linkData := buildLinkData("enrollment", enrollment.ID)
+
+	tokens := fetchUserTokens(ctx, userID)
+	for _, token := range tokens {
+		_ = services.SendFCMV1ToTokenWithData(token, title, body, linkData)
+	}
+	if len(tokens) == 0 {
+		_ = services.SendFCMTopicV1WithData(fmt.Sprintf("student_%d", userID), title, body, linkData)
+	}
+
+	storeNotification(ctx, title, body, "student", userID, enrollment.ID, "enrollment", adminID)
 }
 
 func AdminDeleteEnrollment(c *gin.Context) {

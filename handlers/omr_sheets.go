@@ -1,14 +1,14 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +20,18 @@ import (
 	"edunova-server/services/omr"
 )
 
-const uploadsRoot = "./uploads/omr"
+// annotatedPreviewDataURL JPEG-encodes img entirely in memory and returns it
+// as a data: URL — nothing is written to disk. The annotated overlay is a
+// one-time review aid for right after evaluating, not stored data, so it
+// only ever travels in the upload response and is gone once that response
+// is sent.
+func annotatedPreviewDataURL(img image.Image) string {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+		return ""
+	}
+	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+}
 
 // headerOnlyTemplate builds a template just to know where the fiducial
 // markers, roll-number grid and exam-code grid are — that part of the
@@ -28,12 +39,6 @@ const uploadsRoot = "./uploads/omr"
 // so it's enough to identify a sheet before its real template is known.
 func headerOnlyTemplate() omr.Template {
 	return omr.BuildTemplate(omr.MinQuestions, 1)
-}
-
-func randomFilename(ext string) string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b) + ext
 }
 
 // syncOMRSheetGradebook posts (or, if existingResultID is set, updates) a
@@ -89,9 +94,12 @@ func syncOMRSheetGradebook(ctx context.Context, adminID int, examID int, matched
 // AdminUploadOMRSheet accepts a photo of a filled bubble sheet, decodes it,
 // and scores it against the exam identified by the sheet's own printed exam
 // code (no need to pre-select an exam) or an explicit `exam_id` form field
-// as a fallback if the code can't be read.
+// as a fallback if the code can't be read. The photo itself is never
+// written to disk or the database — only the scored result is persisted;
+// an annotated preview of the marks is generated in memory and returned
+// just for this one response.
 func AdminUploadOMRSheet(c *gin.Context) {
-	file, header, err := c.Request.FormFile("image")
+	file, _, err := c.Request.FormFile("image")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "an 'image' file is required"})
 		return
@@ -138,26 +146,18 @@ func AdminUploadOMRSheet(c *gin.Context) {
 		return
 	}
 
+	var unsetAnswers int
+	if err := database.DB.QueryRow(ctx,
+		`SELECT COUNT(*) FROM omr_questions WHERE omr_exam_id = $1 AND correct_option IS NULL`, examID,
+	).Scan(&unsetAnswers); err == nil && unsetAnswers > 0 {
+		c.JSON(http.StatusUnprocessableEntity, models.ErrorResponse{Error: "set this token's answer key before evaluating sheets"})
+		return
+	}
+
 	fullTemplate := omr.BuildTemplate(questionCount, columns)
 	result, err := omr.Detect(img, fullTemplate)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, models.ErrorResponse{Error: err.Error()})
-		return
-	}
-
-	// Persist the photo.
-	dir := filepath.Join(uploadsRoot, strconv.Itoa(examID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to save image"})
-		return
-	}
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
-		ext = ".jpg"
-	}
-	imagePath := filepath.Join(dir, randomFilename(ext))
-	if err := c.SaveUploadedFile(header, imagePath); err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to save image"})
 		return
 	}
 
@@ -217,6 +217,7 @@ func AdminUploadOMRSheet(c *gin.Context) {
 	}
 
 	rawDetection, _ := json.Marshal(outcomes)
+	preview := annotatedPreviewDataURL(omr.Annotate(img, result.Questions, result.BubbleRadiusPx, correctByQ))
 
 	adminIDRaw, _ := c.Get("admin_id")
 	adminID, _ := adminIDRaw.(int)
@@ -225,10 +226,10 @@ func AdminUploadOMRSheet(c *gin.Context) {
 	var sheetID int
 	var createdAt time.Time
 	err = database.DB.QueryRow(ctx,
-		`INSERT INTO omr_sheets (omr_exam_id, image_path, detected_roll_number, matched_student_id, status, score, total_questions, raw_detection, student_result_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO omr_sheets (omr_exam_id, detected_roll_number, matched_student_id, status, score, total_questions, raw_detection, student_result_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id, created_at`,
-		examID, imagePath, result.RollNumber, matchedStudentID, status, score, questionCount, string(rawDetection), studentResultID,
+		examID, result.RollNumber, matchedStudentID, status, score, questionCount, string(rawDetection), studentResultID,
 	).Scan(&sheetID, &createdAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to save sheet result"})
@@ -238,7 +239,7 @@ func AdminUploadOMRSheet(c *gin.Context) {
 	c.JSON(http.StatusCreated, models.OMRSheet{
 		ID:                 sheetID,
 		OMRExamID:          examID,
-		ImagePath:          imagePath,
+		AnnotatedPreview:   preview,
 		DetectedRollNumber: result.RollNumber,
 		MatchedStudentID:   matchedStudentID,
 		MatchedStudentName: matchedStudentName,
@@ -262,7 +263,7 @@ func AdminListOMRSheets(c *gin.Context) {
 		return
 	}
 	rows, err := database.DB.Query(c.Request.Context(), `
-		SELECT sh.id, sh.omr_exam_id, sh.image_path, sh.detected_roll_number, sh.matched_student_id,
+		SELECT sh.id, sh.omr_exam_id, sh.detected_roll_number, sh.matched_student_id,
 		       COALESCE(st.name, ''), sh.status, sh.score, sh.total_questions, sh.student_result_id, sh.created_at
 		FROM omr_sheets sh
 		LEFT JOIN omr_students st ON st.id = sh.matched_student_id
@@ -277,7 +278,7 @@ func AdminListOMRSheets(c *gin.Context) {
 	sheets := []models.OMRSheet{}
 	for rows.Next() {
 		var s models.OMRSheet
-		if err := rows.Scan(&s.ID, &s.OMRExamID, &s.ImagePath, &s.DetectedRollNumber, &s.MatchedStudentID,
+		if err := rows.Scan(&s.ID, &s.OMRExamID, &s.DetectedRollNumber, &s.MatchedStudentID,
 			&s.MatchedStudentName, &s.Status, &s.Score, &s.TotalQuestions, &s.StudentResultID, &s.CreatedAt); err == nil {
 			s.GradebookSynced = s.StudentResultID != nil
 			sheets = append(sheets, s)
@@ -303,12 +304,12 @@ func AdminGetOMRSheet(c *gin.Context) {
 	var s models.OMRSheet
 	var rawDetection string
 	err = database.DB.QueryRow(c.Request.Context(), `
-		SELECT sh.id, sh.omr_exam_id, sh.image_path, sh.detected_roll_number, sh.matched_student_id,
+		SELECT sh.id, sh.omr_exam_id, sh.detected_roll_number, sh.matched_student_id,
 		       COALESCE(st.name, ''), sh.status, sh.score, sh.total_questions, sh.raw_detection, sh.student_result_id, sh.created_at
 		FROM omr_sheets sh
 		LEFT JOIN omr_students st ON st.id = sh.matched_student_id
 		WHERE sh.id = $1 AND sh.omr_exam_id = $2`, sheetID, examID,
-	).Scan(&s.ID, &s.OMRExamID, &s.ImagePath, &s.DetectedRollNumber, &s.MatchedStudentID,
+	).Scan(&s.ID, &s.OMRExamID, &s.DetectedRollNumber, &s.MatchedStudentID,
 		&s.MatchedStudentName, &s.Status, &s.Score, &s.TotalQuestions, &rawDetection, &s.StudentResultID, &s.CreatedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "sheet not found"})
@@ -317,6 +318,44 @@ func AdminGetOMRSheet(c *gin.Context) {
 	_ = json.Unmarshal([]byte(rawDetection), &s.Questions)
 	s.GradebookSynced = s.StudentResultID != nil
 	c.JSON(http.StatusOK, s)
+}
+
+// AdminDeleteOMRSheet removes a scored sheet's detection record and (if one
+// was posted) the student_results row it created, so a duplicate or
+// mis-scanned upload doesn't linger in the student's Results.
+func AdminDeleteOMRSheet(c *gin.Context) {
+	examID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid exam id"})
+		return
+	}
+	sheetID, err := strconv.Atoi(c.Param("sheetId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid sheet id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	var studentResultID *int
+	err = database.DB.QueryRow(ctx,
+		`SELECT student_result_id FROM omr_sheets WHERE id = $1 AND omr_exam_id = $2`,
+		sheetID, examID,
+	).Scan(&studentResultID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "sheet not found"})
+		return
+	}
+
+	if _, err := database.DB.Exec(ctx, `DELETE FROM omr_sheets WHERE id = $1`, sheetID); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to delete sheet"})
+		return
+	}
+	if studentResultID != nil {
+		_, _ = database.DB.Exec(ctx, `DELETE FROM student_results WHERE id = $1`, *studentResultID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
 // AdminUpdateOMRSheet applies manual corrections to a misread sheet —
@@ -410,15 +449,14 @@ func AdminUpdateOMRSheet(c *gin.Context) {
 		return
 	}
 
-	var imagePath, detectedRoll string
+	var detectedRoll string
 	var createdAt time.Time
-	_ = database.DB.QueryRow(ctx, `SELECT image_path, detected_roll_number, created_at FROM omr_sheets WHERE id = $1`, sheetID).
-		Scan(&imagePath, &detectedRoll, &createdAt)
+	_ = database.DB.QueryRow(ctx, `SELECT detected_roll_number, created_at FROM omr_sheets WHERE id = $1`, sheetID).
+		Scan(&detectedRoll, &createdAt)
 
 	c.JSON(http.StatusOK, models.OMRSheet{
 		ID:                 sheetID,
 		OMRExamID:          examID,
-		ImagePath:          imagePath,
 		DetectedRollNumber: detectedRoll,
 		MatchedStudentID:   matchedStudentID,
 		MatchedStudentName: matchedStudentName,

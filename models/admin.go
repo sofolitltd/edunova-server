@@ -189,6 +189,7 @@ type Enrollment struct {
 	Amount         int       `json:"amount"`
 	SentFrom       string    `json:"sent_from"`
 	SentTo         string    `json:"sent_to"`
+	TransactionID  string    `json:"transaction_id"`
 	ReferralSource string    `json:"referral_source"`
 	Status         string    `json:"status"`
 	EnrolledBy     string    `json:"enrolled_by"`
@@ -200,7 +201,8 @@ type Enrollment struct {
 }
 
 type CreateEnrollmentRequest struct {
-	CourseID       int    `json:"course_id" binding:"required"`
+	CourseID       int    `json:"course_id"`
+	BatchID        *int   `json:"batch_id"`
 	FullName       string `json:"full_name" binding:"required"`
 	Mobile         string `json:"mobile" binding:"required"`
 	PaymentMethod  string `json:"payment_method"`
@@ -208,7 +210,52 @@ type CreateEnrollmentRequest struct {
 	Amount         int    `json:"amount"`
 	SentFrom       string `json:"sent_from"`
 	SentTo         string `json:"sent_to"`
+	TransactionID  string `json:"transaction_id"`
 	ReferralSource string `json:"referral_source"`
+	PromoCode      string `json:"promo_code"`
+}
+
+type PromoCode struct {
+	ID              int        `json:"id"`
+	Code            string     `json:"code"`
+	DiscountType    string     `json:"discount_type"`
+	DiscountValue   int        `json:"discount_value"`
+	CourseID        *int       `json:"course_id"`
+	CourseName      string     `json:"course_name,omitempty"`
+	BatchID         *int       `json:"batch_id"`
+	BatchName       string     `json:"batch_name,omitempty"`
+	MaxRedemptions  *int       `json:"max_redemptions"`
+	RedemptionCount int        `json:"redemption_count"`
+	ExpiresAt       *time.Time `json:"expires_at"`
+	IsActive        bool       `json:"is_active"`
+	CreatedAt       time.Time  `json:"created_at"`
+}
+
+type CreatePromoCodeRequest struct {
+	Code           string     `json:"code" binding:"required"`
+	DiscountType   string     `json:"discount_type" binding:"required"`
+	DiscountValue  int        `json:"discount_value" binding:"required"`
+	CourseID       *int       `json:"course_id"`
+	BatchID        *int       `json:"batch_id"`
+	MaxRedemptions *int       `json:"max_redemptions"`
+	ExpiresAt      *time.Time `json:"expires_at"`
+	IsActive       *bool      `json:"is_active"`
+}
+
+type AvailablePromoCode struct {
+	Code          string     `json:"code"`
+	DiscountType  string     `json:"discount_type"`
+	DiscountValue int        `json:"discount_value"`
+	Remaining     *int       `json:"remaining"`
+	ExpiresAt     *time.Time `json:"expires_at"`
+}
+
+type ValidatePromoCodeRequest struct {
+	Code     string `json:"code" binding:"required"`
+	Mobile   string `json:"mobile" binding:"required"`
+	CourseID int    `json:"course_id"`
+	BatchID  *int   `json:"batch_id"`
+	Amount   int    `json:"amount" binding:"required"`
 }
 
 type DirectEnrollRequest struct {
@@ -497,6 +544,37 @@ type CreateExpenseRequest struct {
 	Amount      int    `json:"amount" binding:"required"`
 	Date        string `json:"date"`
 	Notes       string `json:"notes"`
+}
+
+type SMSTemplate struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	Body      string    `json:"body"`
+	CreatedBy int       `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type CreateSMSTemplateRequest struct {
+	Name string `json:"name" binding:"required"`
+	Body string `json:"body" binding:"required"`
+}
+
+type SendSMSRequest struct {
+	TemplateID *int     `json:"template_id"`
+	Message    string   `json:"message"`
+	Mobiles    []string `json:"mobiles"`
+	StudentIDs []int    `json:"student_ids"`
+}
+
+type SendSMSFailure struct {
+	Mobile string `json:"mobile"`
+	Error  string `json:"error"`
+}
+
+type SendSMSResponse struct {
+	Sent   int              `json:"sent"`
+	Failed []SendSMSFailure `json:"failed"`
 }
 
 type MonthlyFinance struct {

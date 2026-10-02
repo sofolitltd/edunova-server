@@ -231,6 +231,53 @@ func AdminGetBatches(c *gin.Context) {
 	c.JSON(http.StatusOK, batches)
 }
 
+// UserGetSuggestedBatches lists active batches for the logged-in user's
+// class, so the app can suggest a physical coaching batch to join.
+func UserGetSuggestedBatches(c *gin.Context) {
+	userIDRaw, _ := c.Get("user_id")
+	userID, ok := userIDRaw.(int)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, models.ErrorResponse{Error: "user not found"})
+		return
+	}
+
+	var classLevel string
+	_ = database.DB.QueryRow(context.Background(),
+		`SELECT COALESCE(student_class,'') FROM users WHERE id = $1`, userID).Scan(&classLevel)
+	if classLevel == "" {
+		c.JSON(http.StatusOK, []models.Batch{})
+		return
+	}
+
+	// b.class_level holds the admin-facing class name (e.g. "Class 4"), while
+	// classLevel here is the normalized digit ("4") stored on the user —
+	// compare on the digits extracted from class_level so the two line up.
+	rows, err := database.DB.Query(context.Background(),
+		`SELECT b.id, b.class_level, b.course_id, COALESCE(c.title, ''), b.name, COALESCE(b.days, '{}'),
+			COALESCE(b.start_time, ''), COALESCE(b.end_time, ''), COALESCE(b.schedule, ''),
+			b.max_students, COALESCE(b.status, 'active'), b.admission_fee, b.note_fee, b.monthly_fee, b.shift, b.type, COALESCE(b.year, 0),
+			COALESCE(b.section, ''), COALESCE(b.code, '')
+		 FROM batches b LEFT JOIN courses c ON b.course_id = c.id
+		 WHERE regexp_replace(b.class_level, '\D', '', 'g') = $1 AND COALESCE(b.status, 'active') = 'active'
+		 ORDER BY b.name`, classLevel)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	batches := []models.Batch{}
+	for rows.Next() {
+		var b models.Batch
+		if err := rows.Scan(&b.ID, &b.ClassLevel, &b.CourseID, &b.CourseName, &b.Name, &b.Days,
+			&b.StartTime, &b.EndTime, &b.Schedule, &b.MaxStudents, &b.Status, &b.AdmissionFee, &b.NoteFee, &b.MonthlyFee, &b.Shift, &b.Type, &b.Year,
+			&b.Section, &b.Code); err == nil {
+			batches = append(batches, b)
+		}
+	}
+	c.JSON(http.StatusOK, batches)
+}
+
 func AdminCheckBatchName(c *gin.Context) {
 	name := strings.TrimSpace(c.Query("name"))
 	if name == "" {
