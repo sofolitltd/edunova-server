@@ -22,6 +22,9 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+	if !requireEnglishText(c, textField{"Name", req.FullName}) {
+		return
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -83,7 +86,7 @@ func Login(c *gin.Context) {
 		 COALESCE(religion,''), COALESCE(student_class,''),
 		 COALESCE(shift,''), COALESCE(school,''),
 		 COALESCE(present_address,''), COALESCE(permanent_address,''),
-		 created_at, updated_at
+		 COALESCE(photo_url,''), created_at, updated_at
 		 FROM users WHERE mobile = $1`,
 		req.Mobile,
 	).Scan(&user.ID, &user.FullName, &user.Mobile, &user.PasswordHash, &user.Verified,
@@ -92,7 +95,7 @@ func Login(c *gin.Context) {
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
 		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
-		&user.CreatedAt, &user.UpdatedAt)
+		&user.PhotoURL, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusUnauthorized, models.ErrorResponse{Error: "invalid mobile or password"})
@@ -133,7 +136,7 @@ func GetUser(c *gin.Context) {
 		 COALESCE(religion,''), COALESCE(student_class,''),
 		 COALESCE(shift,''), COALESCE(school,''),
 		 COALESCE(present_address,''), COALESCE(permanent_address,''),
-		 created_at, updated_at
+		 COALESCE(photo_url,''), created_at, updated_at
 		 FROM users WHERE mobile = $1`,
 		mobile,
 	).Scan(&user.ID, &user.FullName, &user.Mobile, &user.Verified,
@@ -142,7 +145,7 @@ func GetUser(c *gin.Context) {
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
 		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
-		&user.CreatedAt, &user.UpdatedAt)
+		&user.PhotoURL, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "user not found"})
@@ -205,13 +208,20 @@ func UpdateUserProfile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+	if !requireEnglishText(c,
+		textField{"Name", req.FullName}, textField{"Father's name", req.FatherName},
+		textField{"Mother's name", req.MotherName}, textField{"School", req.School},
+		textField{"Present address", req.PresentAddress}) {
+		return
+	}
 
 	var user models.User
 	err := database.DB.QueryRow(context.Background(),
 		`UPDATE users SET full_name=$1, father_name=$2, father_mobile=$3,
 		 mother_name=$4, mother_mobile=$5, notification_mobile=$6,
 		 gender=$7, religion=$8, student_class=$9, shift=$10,
-		 school=$11, present_address=$12, permanent_address=$13, updated_at=NOW() WHERE mobile=$14
+		 school=$11, present_address=$12, permanent_address=$13,
+		 photo_url=COALESCE(NULLIF($15,''), photo_url), updated_at=NOW() WHERE mobile=$14
 		 RETURNING id, full_name, mobile, verified,
 		 COALESCE(father_name,''), COALESCE(father_mobile,''),
 		 COALESCE(mother_name,''), COALESCE(mother_mobile,''),
@@ -219,18 +229,18 @@ func UpdateUserProfile(c *gin.Context) {
 		 COALESCE(religion,''), COALESCE(student_class,''),
 		 COALESCE(shift,''), COALESCE(school,''),
 		 COALESCE(present_address,''), COALESCE(permanent_address,''),
-		 created_at, updated_at`,
+		 COALESCE(photo_url,''), created_at, updated_at`,
 		req.FullName, req.FatherName, req.FatherMobile,
 		req.MotherName, req.MotherMobile, req.NotificationMobile,
 		req.Gender, req.Religion, req.StudentClass, req.Shift,
-		req.School, req.PresentAddress, req.PermanentAddress, mobile,
+		req.School, req.PresentAddress, req.PermanentAddress, mobile, req.PhotoURL,
 	).Scan(&user.ID, &user.FullName, &user.Mobile, &user.Verified,
 		&user.FatherName, &user.FatherMobile,
 		&user.MotherName, &user.MotherMobile,
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
 		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
-		&user.CreatedAt, &user.UpdatedAt)
+		&user.PhotoURL, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update profile"})
 		return
@@ -407,7 +417,7 @@ func OTPLoginVerify(c *gin.Context) {
 		 COALESCE(religion,''), COALESCE(student_class,''),
 		 COALESCE(shift,''), COALESCE(school,''),
 		 COALESCE(present_address,''), COALESCE(permanent_address,''),
-		 created_at, updated_at
+		 COALESCE(photo_url,''), created_at, updated_at
 		 FROM users WHERE mobile=$1`, req.Mobile,
 	).Scan(&user.ID, &user.FullName, &user.Mobile, &user.Verified,
 		&user.FatherName, &user.FatherMobile,
@@ -415,7 +425,7 @@ func OTPLoginVerify(c *gin.Context) {
 		&user.NotificationMobile, &user.Gender,
 		&user.Religion, &user.StudentClass,
 		&user.Shift, &user.School, &user.PresentAddress, &user.PermanentAddress,
-		&user.CreatedAt, &user.UpdatedAt)
+		&user.PhotoURL, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "user not found"})

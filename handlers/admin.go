@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -880,6 +881,9 @@ func PublicCreateEnrollment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "course_id or batch_id is required"})
 		return
 	}
+	if !requireEnglishText(c, textField{"Name", req.FullName}) {
+		return
+	}
 
 	if req.PaymentMethod == "" {
 		req.PaymentMethod = "manual"
@@ -1012,7 +1016,8 @@ func AdminGetEnrollments(c *gin.Context) {
 	rows, err := database.DB.Query(
 		context.Background(),
 		`SELECT e.id, COALESCE(e.course_id, 0), COALESCE(c.title,''), COALESCE(c.type,'online'), e.full_name, e.mobile, e.user_id, e.payment_method,
-			e.mobile_banking, e.amount, e.sent_from, e.sent_to, e.transaction_id, e.referral_source, e.status, e.enrolled_by, e.batch_id, COALESCE(b.name,''), e.created_at, e.updated_at
+			e.mobile_banking, e.amount, e.sent_from, e.sent_to, e.transaction_id, e.referral_source, e.status, e.enrolled_by, e.batch_id, COALESCE(b.name,''), e.created_at, e.updated_at,
+			e.student_id, COALESCE(e.fee_breakdown::text, '')
 		 `+baseQuery+` LEFT JOIN batches b ON e.batch_id = b.id`+whereClause+` ORDER BY e.created_at DESC LIMIT $`+strconv.Itoa(argIdx)+` OFFSET $`+strconv.Itoa(argIdx+1),
 		queryArgs...,
 	)
@@ -1024,9 +1029,14 @@ func AdminGetEnrollments(c *gin.Context) {
 
 	for rows.Next() {
 		var en models.Enrollment
+		var feeBreakdown string
 		_ = rows.Scan(&en.ID, &en.CourseID, &en.CourseName, &en.CourseType, &en.FullName, &en.Mobile, &en.UserID,
 			&en.PaymentMethod, &en.MobileBanking, &en.Amount, &en.SentFrom, &en.SentTo, &en.TransactionID,
-			&en.ReferralSource, &en.Status, &en.EnrolledBy, &en.BatchID, &en.BatchName, &en.CreatedAt, &en.UpdatedAt)
+			&en.ReferralSource, &en.Status, &en.EnrolledBy, &en.BatchID, &en.BatchName, &en.CreatedAt, &en.UpdatedAt,
+			&en.StudentID, &feeBreakdown)
+		if feeBreakdown != "" {
+			en.FeeBreakdown = json.RawMessage(feeBreakdown)
+		}
 		enrollments = append(enrollments, en)
 	}
 
@@ -1076,6 +1086,9 @@ func AdminUpdateEnrollmentStatus(c *gin.Context) {
 	_ = database.DB.QueryRow(ctx, `SELECT title FROM courses WHERE id = $1`, enrollment.CourseID).Scan(&enrollment.CourseName)
 
 	notifyEnrollmentStatusChanged(ctx, enrollment, c.GetInt("admin_id"))
+	if enrollment.Status == "approved" {
+		issueAdmissionInvoice(ctx, enrollment.ID)
+	}
 
 	c.JSON(http.StatusOK, enrollment)
 }
@@ -1148,6 +1161,12 @@ func AdminDirectEnroll(c *gin.Context) {
 	var req models.DirectEnrollRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	if !requireEnglishText(c,
+		textField{"Name", req.FullName}, textField{"Father's name", req.FatherName},
+		textField{"Mother's name", req.MotherName}, textField{"School", req.School},
+		textField{"Address", req.Address}) {
 		return
 	}
 
@@ -1249,13 +1268,19 @@ func AdminDirectEnroll(c *gin.Context) {
 		}
 	}
 
+	var feeBreakdown *string
+	if len(req.FeeBreakdown) > 0 && string(req.FeeBreakdown) != "null" {
+		fb := string(req.FeeBreakdown)
+		feeBreakdown = &fb
+	}
+
 	var enrollment models.Enrollment
 	err := database.DB.QueryRow(
 		context.Background(),
-		`INSERT INTO enrollments (course_id, full_name, mobile, student_id, user_id, batch_id, amount, payment_method, sent_from, status, enrolled_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', 'staff')
+		`INSERT INTO enrollments (course_id, full_name, mobile, student_id, user_id, batch_id, amount, payment_method, sent_from, status, enrolled_by, fee_breakdown)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', 'staff', $10::jsonb)
 		 RETURNING id, COALESCE(course_id, 0), full_name, mobile, student_id, user_id, batch_id, amount, payment_method, COALESCE(sent_from, ''), status, enrolled_by, created_at, updated_at`,
-		nullableCourseID(req.CourseID), fullName, mobile, studentID, userID, req.BatchID, req.Amount, paymentMethod, req.Reference,
+		nullableCourseID(req.CourseID), fullName, mobile, studentID, userID, req.BatchID, req.Amount, paymentMethod, req.Reference, feeBreakdown,
 	).Scan(&enrollment.ID, &enrollment.CourseID, &enrollment.FullName, &enrollment.Mobile, &enrollment.StudentID,
 		&enrollment.UserID, &enrollment.BatchID, &enrollment.Amount, &enrollment.PaymentMethod, &enrollment.SentFrom,
 		&enrollment.Status, &enrollment.EnrolledBy, &enrollment.CreatedAt, &enrollment.UpdatedAt)
@@ -1280,6 +1305,8 @@ func AdminDirectEnroll(c *gin.Context) {
 			*userID, enrollment.ID, nullableCourseID(req.CourseID), req.Amount, paymentMethod, req.Reference, receiptNo, adminID,
 		)
 	}
+
+	issueAdmissionInvoice(context.Background(), enrollment.ID)
 
 	c.JSON(http.StatusCreated, enrollment)
 }

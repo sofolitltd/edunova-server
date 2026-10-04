@@ -177,7 +177,7 @@ func AdminGetBooks(c *gin.Context) {
 	classID := c.Query("class_id")
 
 	query := `SELECT b.id, b.subject_id, s.name as subject_name, COALESCE(c.name,'') as class_name,
-	   b.name, b.name_bn, b.publisher, b.created_at
+	   b.name, b.name_bn, b.publisher, b.academic_year, b.is_active, COALESCE(b.replaces_book_id,0), b.created_at
 	  FROM books b
 	  LEFT JOIN subjects s ON b.subject_id = s.id
 	  LEFT JOIN classes c ON b.class_id = c.id
@@ -192,7 +192,12 @@ func AdminGetBooks(c *gin.Context) {
 		query += fmt.Sprintf(" AND b.class_id = $%d", len(args)+1)
 		args = append(args, classID)
 	}
-	query += " ORDER BY s.name, b.name"
+	// ?active=1 hides archived editions (what teachers pick from); the admin
+	// list shows everything.
+	if c.Query("active") == "1" {
+		query += " AND b.is_active"
+	}
+	query += " ORDER BY s.name, b.name, b.academic_year DESC"
 
 	rows, err := database.DB.Query(context.Background(), query, args...)
 	if err != nil {
@@ -205,7 +210,7 @@ func AdminGetBooks(c *gin.Context) {
 	for rows.Next() {
 		var b models.Book
 		if err := rows.Scan(&b.ID, &b.SubjectID, &b.SubjectName, &b.ClassName,
-			&b.Name, &b.NameBn, &b.Publisher, &b.CreatedAt); err != nil {
+			&b.Name, &b.NameBn, &b.Publisher, &b.AcademicYear, &b.IsActive, &b.ReplacesBookID, &b.CreatedAt); err != nil {
 			continue
 		}
 		books = append(books, b)
@@ -225,10 +230,10 @@ func AdminCreateBook(c *gin.Context) {
 
 	var b models.Book
 	err := database.DB.QueryRow(context.Background(),
-		`INSERT INTO books (subject_id, class_id, name, name_bn, publisher) VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, subject_id, name, name_bn, publisher, created_at`,
-		req.SubjectID, req.ClassID, req.Name, req.NameBn, req.Publisher,
-	).Scan(&b.ID, &b.SubjectID, &b.Name, &b.NameBn, &b.Publisher, &b.CreatedAt)
+		`INSERT INTO books (subject_id, class_id, name, name_bn, publisher, academic_year) VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, subject_id, name, name_bn, publisher, academic_year, is_active, created_at`,
+		req.SubjectID, req.ClassID, req.Name, req.NameBn, req.Publisher, req.AcademicYear,
+	).Scan(&b.ID, &b.SubjectID, &b.Name, &b.NameBn, &b.Publisher, &b.AcademicYear, &b.IsActive, &b.CreatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create book"})
 		return
@@ -246,15 +251,95 @@ func AdminUpdateBook(c *gin.Context) {
 
 	var b models.Book
 	err := database.DB.QueryRow(context.Background(),
-		`UPDATE books SET subject_id=$1, class_id=$2, name=$3, name_bn=$4, publisher=$5 WHERE id=$6
-		 RETURNING id, subject_id, name, name_bn, publisher, created_at`,
-		req.SubjectID, req.ClassID, req.Name, req.NameBn, req.Publisher, id,
-	).Scan(&b.ID, &b.SubjectID, &b.Name, &b.NameBn, &b.Publisher, &b.CreatedAt)
+		`UPDATE books SET subject_id=$1, class_id=$2, name=$3, name_bn=$4, publisher=$5, academic_year=$6 WHERE id=$7
+		 RETURNING id, subject_id, name, name_bn, publisher, academic_year, is_active, created_at`,
+		req.SubjectID, req.ClassID, req.Name, req.NameBn, req.Publisher, req.AcademicYear, id,
+	).Scan(&b.ID, &b.SubjectID, &b.Name, &b.NameBn, &b.Publisher, &b.AcademicYear, &b.IsActive, &b.CreatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update book"})
 		return
 	}
 	c.JSON(http.StatusOK, b)
+}
+
+// AdminCloneBook starts a new edition of a book: it copies the book with its
+// chapters and topics under a new academic year and archives the old edition.
+// Lessons keep pointing at the old chapters, so past content never changes.
+func AdminCloneBook(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var req models.CloneBookRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	tx, err := database.DB.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to start transaction"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var b models.Book
+	err = tx.QueryRow(ctx,
+		`INSERT INTO books (subject_id, class_id, name, name_bn, publisher, academic_year, replaces_book_id)
+		 SELECT subject_id, class_id, COALESCE(NULLIF($2,''), name), COALESCE(NULLIF($3,''), name_bn),
+		        COALESCE(NULLIF($4,''), publisher), $5, id
+		 FROM books WHERE id=$1
+		 RETURNING id, subject_id, name, name_bn, publisher, academic_year, is_active, COALESCE(replaces_book_id,0), created_at`,
+		id, req.Name, req.NameBn, req.Publisher, req.AcademicYear,
+	).Scan(&b.ID, &b.SubjectID, &b.Name, &b.NameBn, &b.Publisher, &b.AcademicYear, &b.IsActive, &b.ReplacesBookID, &b.CreatedAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "book not found"})
+		return
+	}
+
+	// Chapters are copied one by one so each topic can be re-parented to its
+	// new chapter.
+	rows, err := tx.Query(ctx, `SELECT id, name, name_bn, order_index FROM chapters WHERE book_id=$1 ORDER BY order_index, id`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to copy chapters"})
+		return
+	}
+	type oldChapter struct {
+		id, order int
+		name, bn  string
+	}
+	var old []oldChapter
+	for rows.Next() {
+		var ch oldChapter
+		if err := rows.Scan(&ch.id, &ch.name, &ch.bn, &ch.order); err == nil {
+			old = append(old, ch)
+		}
+	}
+	rows.Close()
+
+	for _, ch := range old {
+		var newID int
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO chapters (book_id, name, name_bn, order_index) VALUES ($1, $2, $3, $4) RETURNING id`,
+			b.ID, ch.name, ch.bn, ch.order).Scan(&newID); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to copy chapters"})
+			return
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO topics (chapter_id, name, name_bn, order_index)
+			 SELECT $1, name, name_bn, order_index FROM topics WHERE chapter_id=$2`, newID, ch.id); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to copy topics"})
+			return
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE books SET is_active=FALSE WHERE id=$1`, id); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to archive old edition"})
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to clone book"})
+		return
+	}
+	c.JSON(http.StatusCreated, b)
 }
 
 func AdminDeleteBook(c *gin.Context) {

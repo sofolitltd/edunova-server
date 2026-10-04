@@ -278,7 +278,7 @@ func TeacherChangePassword(c *gin.Context) {
 
 func AdminListTeachers(c *gin.Context) {
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT id, email, full_name, created_at, updated_at FROM teachers ORDER BY id ASC`)
+		`SELECT id, email, full_name, COALESCE(nickname,''), COALESCE(gender,''), created_at, updated_at FROM teachers ORDER BY id ASC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
 		return
@@ -288,7 +288,7 @@ func AdminListTeachers(c *gin.Context) {
 	var teachers []models.Teacher
 	for rows.Next() {
 		var t models.Teacher
-		if err := rows.Scan(&t.ID, &t.Email, &t.FullName, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Email, &t.FullName, &t.Nickname, &t.Gender, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			continue
 		}
 		teachers = append(teachers, t)
@@ -304,9 +304,9 @@ func AdminGetTeacher(c *gin.Context) {
 
 	var t models.Teacher
 	err := database.DB.QueryRow(context.Background(),
-		`SELECT id, email, full_name, phone, education, bio, address, photo_url, join_date, leave_date, created_at, updated_at
+		`SELECT id, email, full_name, COALESCE(nickname,''), COALESCE(gender,''), phone, education, bio, address, photo_url, join_date, leave_date, created_at, updated_at
 		 FROM teachers WHERE id = $1`, id,
-	).Scan(&t.ID, &t.Email, &t.FullName, &t.Phone, &t.Education, &t.Bio, &t.Address, &t.PhotoURL, &t.JoinDate, &t.LeaveDate, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Email, &t.FullName, &t.Nickname, &t.Gender, &t.Phone, &t.Education, &t.Bio, &t.Address, &t.PhotoURL, &t.JoinDate, &t.LeaveDate, &t.CreatedAt, &t.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "teacher not found"})
 		return
@@ -338,11 +338,11 @@ func AdminUpdateTeacher(c *gin.Context) {
 
 	var t models.Teacher
 	err := database.DB.QueryRow(context.Background(),
-		`UPDATE teachers SET full_name=$1, email=$2, phone=$3, education=$4, bio=$5, address=$6, photo_url=$7, join_date=$8, leave_date=$9, updated_at=NOW()
-		 WHERE id=$10
-		 RETURNING id, email, full_name, phone, education, bio, address, photo_url, join_date, leave_date, created_at, updated_at`,
-		req.FullName, req.Email, req.Phone, req.Education, req.Bio, req.Address, req.PhotoURL, req.JoinDate, req.LeaveDate, id,
-	).Scan(&t.ID, &t.Email, &t.FullName, &t.Phone, &t.Education, &t.Bio, &t.Address, &t.PhotoURL, &t.JoinDate, &t.LeaveDate, &t.CreatedAt, &t.UpdatedAt)
+		`UPDATE teachers SET full_name=$1, email=$2, phone=$3, education=$4, bio=$5, address=$6, photo_url=$7, join_date=$8, leave_date=$9, nickname=$10, gender=$11, updated_at=NOW()
+		 WHERE id=$12
+		 RETURNING id, email, full_name, COALESCE(nickname,''), COALESCE(gender,''), phone, education, bio, address, photo_url, join_date, leave_date, created_at, updated_at`,
+		req.FullName, req.Email, req.Phone, req.Education, req.Bio, req.Address, req.PhotoURL, req.JoinDate, req.LeaveDate, req.Nickname, req.Gender, id,
+	).Scan(&t.ID, &t.Email, &t.FullName, &t.Nickname, &t.Gender, &t.Phone, &t.Education, &t.Bio, &t.Address, &t.PhotoURL, &t.JoinDate, &t.LeaveDate, &t.CreatedAt, &t.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "teacher not found"})
 		return
@@ -378,11 +378,11 @@ func AdminCreateTeacher(c *gin.Context) {
 
 	var teacher models.Teacher
 	err = database.DB.QueryRow(context.Background(),
-		`INSERT INTO teachers (email, password_hash, full_name)
-		 VALUES ($1, $2, $3)
-		 RETURNING id, email, full_name, created_at, updated_at`,
-		req.Email, string(hash), req.FullName,
-	).Scan(&teacher.ID, &teacher.Email, &teacher.FullName, &teacher.CreatedAt, &teacher.UpdatedAt)
+		`INSERT INTO teachers (email, password_hash, full_name, nickname, gender)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, email, full_name, nickname, gender, created_at, updated_at`,
+		req.Email, string(hash), req.FullName, req.Nickname, req.Gender,
+	).Scan(&teacher.ID, &teacher.Email, &teacher.FullName, &teacher.Nickname, &teacher.Gender, &teacher.CreatedAt, &teacher.UpdatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create teacher"})
 		return

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"edunova-server/database"
 	"edunova-server/models"
+	"edunova-server/services"
 )
 
 func AdminGetDoubts(c *gin.Context) {
@@ -253,7 +255,7 @@ func AdminGetTodayLessons(c *gin.Context) {
 
 	query := `SELECT l.id, l.course_id, COALESCE(c.title,''), l.batch_id, COALESCE(b.name,''),
 		 l.title, COALESCE(l.description,''), COALESCE(l.subject,''), COALESCE(l.chapter,''),
-		 l.lesson_date, COALESCE(l.teacher_notes,''), l.created_by, l.created_at
+		 COALESCE(l.chapter_id,0), COALESCE(l.topic,''), COALESCE(l.topic_id,0), l.lesson_date::text, COALESCE(l.teacher_notes,''), COALESCE(l.kind,'lesson'), COALESCE(l.link_url,''), COALESCE(l.created_by,0), l.created_at
 		 FROM lessons l
 		 LEFT JOIN courses c ON l.course_id = c.id
 		 LEFT JOIN batches b ON l.batch_id = b.id`
@@ -287,8 +289,8 @@ func AdminGetTodayLessons(c *gin.Context) {
 	for rows.Next() {
 		var l models.Lesson
 		if err := rows.Scan(&l.ID, &l.CourseID, &l.CourseName, &l.BatchID, &l.BatchName,
-			&l.Title, &l.Description, &l.Subject, &l.Chapter,
-			&l.LessonDate, &l.TeacherNotes, &l.CreatedBy, &l.CreatedAt); err != nil {
+			&l.Title, &l.Description, &l.Subject, &l.Chapter, &l.ChapterID, &l.Topic, &l.TopicID,
+			&l.LessonDate, &l.TeacherNotes, &l.Kind, &l.LinkURL, &l.CreatedBy, &l.CreatedAt); err != nil {
 			continue
 		}
 		lessons = append(lessons, l)
@@ -344,10 +346,10 @@ func UserGetTodayLessons(c *gin.Context) {
 func AdminGetCalendarEvents(c *gin.Context) {
 	month := c.Query("month")
 	query := `
-		SELECT ce.id, ce.title, COALESCE(ce.description,''), ce.event_type, ce.date,
-		 COALESCE(ce.end_date,''), ce.course_id, COALESCE(c.title,''),
-		 ce.batch_id, COALESCE(b.name,''), COALESCE(ce.color,'#6366F1'),
-		 ce.is_auto, ce.notification_sent, ce.created_by, ce.created_at
+		SELECT ce.id, ce.title, COALESCE(ce.description,''), ce.event_type, ce.date::text,
+		 COALESCE(ce.end_date::text,''), COALESCE(ce.course_id,0), COALESCE(c.title,''),
+		 COALESCE(ce.batch_id,0), COALESCE(b.name,''), COALESCE(ce.color,'#6366F1'),
+		 COALESCE(ce.is_auto,false), COALESCE(ce.notification_sent,false), COALESCE(ce.created_by,0), ce.created_at
 		 FROM calendar_events ce
 		 LEFT JOIN courses c ON ce.course_id = c.id
 		 LEFT JOIN batches b ON ce.batch_id = b.id`
@@ -398,8 +400,8 @@ func AdminCreateCalendarEvent(c *gin.Context) {
 	var e models.CalendarEvent
 	err := database.DB.QueryRow(context.Background(),
 		`INSERT INTO calendar_events (title, description, event_type, date, end_date, course_id, batch_id, color, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id, title, description, event_type, date, COALESCE(end_date,''), course_id, batch_id, color, is_auto, created_at`,
+		 VALUES ($1, $2, $3, $4::date, NULLIF($5::text,'')::date, NULLIF($6::int,0), NULLIF($7::int,0), $8, $9)
+		 RETURNING id, title, description, event_type, date::text, COALESCE(end_date::text,''), COALESCE(course_id,0), COALESCE(batch_id,0), color, COALESCE(is_auto,false), created_at`,
 		req.Title, req.Description, req.EventType, req.Date, req.EndDate,
 		req.CourseID, req.BatchID, color, adminID,
 	).Scan(&e.ID, &e.Title, &e.Description, &e.EventType, &e.Date,
@@ -425,8 +427,8 @@ func AdminUpdateCalendarEvent(c *gin.Context) {
 	}
 
 	_, err := database.DB.Exec(context.Background(),
-		`UPDATE calendar_events SET title=$1, description=$2, event_type=$3, date=$4, end_date=$5,
-		 course_id=$6, batch_id=$7, color=$8 WHERE id=$9`,
+		`UPDATE calendar_events SET title=$1, description=$2, event_type=$3, date=$4::date, end_date=NULLIF($5::text,'')::date,
+		 course_id=NULLIF($6::int,0), batch_id=NULLIF($7::int,0), color=$8 WHERE id=$9`,
 		req.Title, req.Description, req.EventType, req.Date, req.EndDate,
 		req.CourseID, req.BatchID, color, id)
 	if err != nil {
@@ -446,12 +448,20 @@ func AdminDeleteCalendarEvent(c *gin.Context) {
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "event deleted"})
 }
 
+// lessonKind defaults an unset kind to a plain class note.
+func lessonKind(kind string) string {
+	if kind == "" {
+		return "lesson"
+	}
+	return kind
+}
+
 func AdminGetLessons(c *gin.Context) {
 	batchID := c.Query("batch_id")
 
 	query := `SELECT l.id, l.course_id, COALESCE(c.title,''), l.batch_id, COALESCE(b.name,''),
 		 l.title, COALESCE(l.description,''), COALESCE(l.subject,''), COALESCE(l.chapter,''),
-		 l.lesson_date, COALESCE(l.teacher_notes,''), l.created_by, l.created_at
+		 COALESCE(l.chapter_id,0), COALESCE(l.topic,''), COALESCE(l.topic_id,0), l.lesson_date::text, COALESCE(l.teacher_notes,''), COALESCE(l.kind,'lesson'), COALESCE(l.link_url,''), COALESCE(l.created_by,0), l.created_at
 		 FROM lessons l
 		 LEFT JOIN courses c ON l.course_id = c.id
 		 LEFT JOIN batches b ON l.batch_id = b.id`
@@ -488,8 +498,8 @@ func AdminGetLessons(c *gin.Context) {
 	for rows.Next() {
 		var l models.Lesson
 		if err := rows.Scan(&l.ID, &l.CourseID, &l.CourseName, &l.BatchID, &l.BatchName,
-			&l.Title, &l.Description, &l.Subject, &l.Chapter,
-			&l.LessonDate, &l.TeacherNotes, &l.CreatedBy, &l.CreatedAt); err != nil {
+			&l.Title, &l.Description, &l.Subject, &l.Chapter, &l.ChapterID, &l.Topic, &l.TopicID,
+			&l.LessonDate, &l.TeacherNotes, &l.Kind, &l.LinkURL, &l.CreatedBy, &l.CreatedAt); err != nil {
 			continue
 		}
 		lessons = append(lessons, l)
@@ -510,22 +520,77 @@ func AdminCreateLesson(c *gin.Context) {
 		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not authorized for this batch"})
 		return
 	}
+	if err := resolveLessonCurriculum(context.Background(), &req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
 	adminID, _ := c.Get("admin_id")
+	kind := lessonKind(req.Kind)
 
 	var l models.Lesson
 	err := database.DB.QueryRow(context.Background(),
-		`INSERT INTO lessons (course_id, batch_id, title, description, subject, chapter, lesson_date, teacher_notes, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id, course_id, title, description, subject, chapter, lesson_date, teacher_notes, created_at`,
+		`INSERT INTO lessons (course_id, batch_id, title, description, subject, chapter, chapter_id, topic, topic_id, lesson_date, teacher_notes, kind, link_url, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7,0), $8, NULLIF($9,0), $10, $11, $12, $13, $14)
+		 RETURNING id, course_id, title, description, subject, chapter, COALESCE(chapter_id,0), topic, COALESCE(topic_id,0), lesson_date::text, teacher_notes, kind, link_url, created_at`,
 		req.CourseID, req.BatchID, req.Title, req.Description, req.Subject,
-		req.Chapter, req.LessonDate, req.TeacherNotes, adminID,
+		req.Chapter, req.ChapterID, req.Topic, req.TopicID, req.LessonDate, req.TeacherNotes, kind, req.LinkURL, adminID,
 	).Scan(&l.ID, &l.CourseID, &l.Title, &l.Description, &l.Subject,
-		&l.Chapter, &l.LessonDate, &l.TeacherNotes, &l.CreatedAt)
+		&l.Chapter, &l.ChapterID, &l.Topic, &l.TopicID, &l.LessonDate, &l.TeacherNotes, &l.Kind, &l.LinkURL, &l.CreatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create lesson"})
 		return
 	}
+	// A lesson dated in the future is not news yet, so it stays silent.
+	if req.BatchID > 0 && req.LessonDate <= time.Now().In(time.FixedZone("BST", 6*60*60)).Format("2006-01-02") {
+		notifyBatchOfLesson(context.Background(), req, l.ID, kind, c.GetInt("admin_id"))
+	}
 	c.JSON(http.StatusCreated, l)
+}
+
+// resolveLessonCurriculum fills the lesson's chapter/topic text from the
+// curriculum when an id is given. The text is a snapshot: later renames or
+// deletions in the curriculum leave already-posted lessons untouched. With no
+// ids the teacher's free text is kept as is.
+func resolveLessonCurriculum(ctx context.Context, req *models.CreateLessonRequest) error {
+	if req.ChapterID > 0 {
+		err := database.DB.QueryRow(ctx,
+			`SELECT COALESCE(NULLIF(name_bn,''), name) FROM chapters WHERE id=$1`, req.ChapterID).Scan(&req.Chapter)
+		if err != nil {
+			return fmt.Errorf("chapter not found")
+		}
+	} else {
+		req.TopicID = 0
+	}
+	if req.TopicID > 0 {
+		err := database.DB.QueryRow(ctx,
+			`SELECT COALESCE(NULLIF(name_bn,''), name) FROM topics WHERE id=$1 AND chapter_id=$2`,
+			req.TopicID, req.ChapterID).Scan(&req.Topic)
+		if err != nil {
+			return fmt.Errorf("topic does not belong to the chapter")
+		}
+	}
+	return nil
+}
+
+var lessonKindLabels = map[string]string{"lesson": "ক্লাস নোট", "video": "ভিডিও", "homework": "বাড়ির কাজ"}
+
+// notifyBatchOfLesson pushes a newly posted class note/video/homework to every
+// device subscribed to the batch and records it in the notification history.
+// It runs inline: a goroutine could be cut off once the serverless response is sent.
+func notifyBatchOfLesson(ctx context.Context, req models.CreateLessonRequest, lessonID int, kind string, adminID int) {
+	title := "নতুন " + lessonKindLabels[kind]
+	if req.Subject != "" {
+		title = req.Subject + ": " + title
+	}
+	body := req.Title
+	if req.Chapter != "" {
+		body += " · " + req.Chapter
+	}
+	topic := fmt.Sprintf("batch_%d", req.BatchID)
+	if err := services.SendFCMTopicV1WithData(topic, title, body, buildLinkData("lesson", lessonID)); err != nil {
+		log.Printf("lesson push to %s failed: %v", topic, err)
+	}
+	storeNotification(ctx, title, body, "batch", req.BatchID, lessonID, "lesson", adminID)
 }
 
 func AdminUpdateLesson(c *gin.Context) {
@@ -540,11 +605,16 @@ func AdminUpdateLesson(c *gin.Context) {
 		return
 	}
 
+	if err := resolveLessonCurriculum(context.Background(), &req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
 	_, err := database.DB.Exec(context.Background(),
 		`UPDATE lessons SET course_id=$1, batch_id=$2, title=$3, description=$4, subject=$5,
-		 chapter=$6, lesson_date=$7, teacher_notes=$8 WHERE id=$9`,
+		 chapter=$6, chapter_id=NULLIF($7,0), topic=$8, topic_id=NULLIF($9,0),
+		 lesson_date=$10, teacher_notes=$11, kind=$12, link_url=$13 WHERE id=$14`,
 		req.CourseID, req.BatchID, req.Title, req.Description, req.Subject,
-		req.Chapter, req.LessonDate, req.TeacherNotes, id)
+		req.Chapter, req.ChapterID, req.Topic, req.TopicID, req.LessonDate, req.TeacherNotes, lessonKind(req.Kind), req.LinkURL, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update lesson"})
 		return
@@ -683,6 +753,9 @@ func AdminVerifyPayment(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to verify payment"})
 		return
+	}
+	if paymentID, err := strconv.Atoi(id); err == nil {
+		issuePaymentInvoice(context.Background(), paymentID)
 	}
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "payment verified"})
 }
@@ -840,10 +913,10 @@ func UserGetArticles(c *gin.Context) {
 func UserGetUpcomingEvents(c *gin.Context) {
 	today := time.Now().Format("2006-01-02")
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT ce.id, ce.title, COALESCE(ce.description,''), ce.event_type, ce.date,
+		`SELECT ce.id, ce.title, COALESCE(ce.description,''), ce.event_type, ce.date::text,
 		 COALESCE(ce.color,'#6366F1')
 		 FROM calendar_events ce
-		 WHERE ce.date >= $1
+		 WHERE ce.date >= $1::date
 		 ORDER BY ce.date ASC LIMIT 20`, today)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to fetch events"})

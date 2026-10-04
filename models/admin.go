@@ -176,28 +176,29 @@ type PaginatedUsers struct {
 }
 
 type Enrollment struct {
-	ID             int       `json:"id"`
-	CourseID       int       `json:"course_id"`
-	CourseName     string    `json:"course_name"`
-	CourseType     string    `json:"course_type"`
-	FullName       string    `json:"full_name"`
-	Mobile         string    `json:"mobile"`
-	StudentID      string    `json:"student_id"`
-	UserID         *int      `json:"user_id"`
-	PaymentMethod  string    `json:"payment_method"`
-	MobileBanking  string    `json:"mobile_banking"`
-	Amount         int       `json:"amount"`
-	SentFrom       string    `json:"sent_from"`
-	SentTo         string    `json:"sent_to"`
-	TransactionID  string    `json:"transaction_id"`
-	ReferralSource string    `json:"referral_source"`
-	Status         string    `json:"status"`
-	EnrolledBy     string    `json:"enrolled_by"`
-	BatchID        *int      `json:"batch_id"`
-	BatchName      string    `json:"batch_name"`
-	BatchSchedule  string    `json:"batch_schedule"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             int             `json:"id"`
+	CourseID       int             `json:"course_id"`
+	CourseName     string          `json:"course_name"`
+	CourseType     string          `json:"course_type"`
+	FullName       string          `json:"full_name"`
+	Mobile         string          `json:"mobile"`
+	StudentID      string          `json:"student_id"`
+	UserID         *int            `json:"user_id"`
+	PaymentMethod  string          `json:"payment_method"`
+	MobileBanking  string          `json:"mobile_banking"`
+	Amount         int             `json:"amount"`
+	SentFrom       string          `json:"sent_from"`
+	SentTo         string          `json:"sent_to"`
+	TransactionID  string          `json:"transaction_id"`
+	ReferralSource string          `json:"referral_source"`
+	Status         string          `json:"status"`
+	EnrolledBy     string          `json:"enrolled_by"`
+	BatchID        *int            `json:"batch_id"`
+	BatchName      string          `json:"batch_name"`
+	BatchSchedule  string          `json:"batch_schedule"`
+	FeeBreakdown   json.RawMessage `json:"fee_breakdown,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 type CreateEnrollmentRequest struct {
@@ -259,25 +260,26 @@ type ValidatePromoCodeRequest struct {
 }
 
 type DirectEnrollRequest struct {
-	UserID             int    `json:"user_id"`
-	Mobile             string `json:"mobile" binding:"required"`
-	CourseID           int    `json:"course_id"`
-	BatchID            *int   `json:"batch_id"`
-	Amount             int    `json:"amount"`
-	FullName           string `json:"full_name"`
-	StudentID          string `json:"student_id"`
-	Gender             string `json:"gender"`
-	StudentClass       string `json:"student_class"`
-	School             string `json:"school"`
-	SchoolShift        string `json:"shift"`
-	FatherName         string `json:"father_name"`
-	FatherMobile       string `json:"father_mobile"`
-	MotherName         string `json:"mother_name"`
-	MotherMobile       string `json:"mother_mobile"`
-	NotificationMobile string `json:"notification_mobile"`
-	Address            string `json:"address"`
-	PaymentMethod      string `json:"payment_method"`
-	Reference          string `json:"reference"`
+	UserID             int             `json:"user_id"`
+	Mobile             string          `json:"mobile" binding:"required"`
+	CourseID           int             `json:"course_id"`
+	BatchID            *int            `json:"batch_id"`
+	Amount             int             `json:"amount"`
+	FullName           string          `json:"full_name"`
+	StudentID          string          `json:"student_id"`
+	Gender             string          `json:"gender"`
+	StudentClass       string          `json:"student_class"`
+	School             string          `json:"school"`
+	SchoolShift        string          `json:"shift"`
+	FatherName         string          `json:"father_name"`
+	FatherMobile       string          `json:"father_mobile"`
+	MotherName         string          `json:"mother_name"`
+	MotherMobile       string          `json:"mother_mobile"`
+	NotificationMobile string          `json:"notification_mobile"`
+	Address            string          `json:"address"`
+	PaymentMethod      string          `json:"payment_method"`
+	Reference          string          `json:"reference"`
+	FeeBreakdown       json.RawMessage `json:"fee_breakdown"`
 }
 
 type UpdateEnrollmentStatusRequest struct {
@@ -323,22 +325,35 @@ type CreateSubjectRequest struct {
 }
 
 type Book struct {
-	ID          int       `json:"id"`
-	SubjectID   int       `json:"subject_id"`
-	ClassName   string    `json:"class_name"`
-	SubjectName string    `json:"subject_name"`
-	Name        string    `json:"name"`
-	NameBn      string    `json:"name_bn"`
-	Publisher   string    `json:"publisher"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int    `json:"id"`
+	SubjectID   int    `json:"subject_id"`
+	ClassName   string `json:"class_name"`
+	SubjectName string `json:"subject_name"`
+	Name        string `json:"name"`
+	NameBn      string `json:"name_bn"`
+	Publisher   string `json:"publisher"`
+	// AcademicYear is the edition year (0 = unspecified); archived editions
+	// keep their chapters so lessons that point at them stay valid.
+	AcademicYear   int       `json:"academic_year"`
+	IsActive       bool      `json:"is_active"`
+	ReplacesBookID int       `json:"replaces_book_id"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type CloneBookRequest struct {
+	AcademicYear int    `json:"academic_year" binding:"required"`
+	Name         string `json:"name"`
+	NameBn       string `json:"name_bn"`
+	Publisher    string `json:"publisher"`
 }
 
 type CreateBookRequest struct {
-	SubjectID int    `json:"subject_id" binding:"required"`
-	ClassID   int    `json:"class_id" binding:"required"`
-	Name      string `json:"name" binding:"required"`
-	NameBn    string `json:"name_bn"`
-	Publisher string `json:"publisher"`
+	SubjectID    int    `json:"subject_id" binding:"required"`
+	ClassID      int    `json:"class_id" binding:"required"`
+	Name         string `json:"name" binding:"required"`
+	NameBn       string `json:"name_bn"`
+	Publisher    string `json:"publisher"`
+	AcademicYear int    `json:"academic_year"`
 }
 
 type Chapter struct {
@@ -679,14 +694,28 @@ type CreateBatchRequest struct {
 // schedule and assigned teacher (a batch can teach several subjects at
 // different day/time slots, each with its own teacher).
 type BatchSubject struct {
-	ID          int      `json:"id"`
-	SubjectID   int      `json:"subject_id"`
-	SubjectName string   `json:"subject_name"`
-	TeacherID   *int     `json:"teacher_id"`
-	TeacherName string   `json:"teacher_name"`
-	Days        []string `json:"days"`
-	StartTime   string   `json:"start_time"`
-	EndTime     string   `json:"end_time"`
+	ID                   int      `json:"id"`
+	SubjectID            int      `json:"subject_id"`
+	SubjectName          string   `json:"subject_name"`
+	TeacherID            *int     `json:"teacher_id"`
+	TeacherName          string   `json:"teacher_name"`
+	TeacherDisplayName   string   `json:"teacher_display_name"`
+	TeacherDisplayNameEn string   `json:"teacher_display_name_en"`
+	Days                 []string `json:"days"`
+	StartTime            string   `json:"start_time"`
+	EndTime              string   `json:"end_time"`
+}
+
+// BatchTeacherHistoryEntry is one stretch of a teacher taking a subject in a
+// batch. ToDate is nil while the assignment is still current.
+type BatchTeacherHistoryEntry struct {
+	ID          int     `json:"id"`
+	SubjectID   int     `json:"subject_id"`
+	SubjectName string  `json:"subject_name"`
+	TeacherID   *int    `json:"teacher_id"`
+	TeacherName string  `json:"teacher_name"`
+	FromDate    string  `json:"from_date"`
+	ToDate      *string `json:"to_date"`
 }
 
 type AssignBatchSubjectRequest struct {
@@ -804,6 +833,7 @@ type StudentResult struct {
 	MarksTotal    float64   `json:"marks_total"`
 	Percentage    float64   `json:"percentage"`
 	Remarks       string    `json:"remarks"`
+	Absent        bool      `json:"absent"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -815,6 +845,21 @@ type CreateResultRequest struct {
 	MarksObtained float64 `json:"marks_obtained" binding:"required,min=0"`
 	MarksTotal    float64 `json:"marks_total" binding:"required,min=1"`
 	Remarks       string  `json:"remarks"`
+}
+
+type BulkResultRow struct {
+	UserID        int     `json:"user_id" binding:"required"`
+	MarksObtained float64 `json:"marks_obtained" binding:"min=0"`
+	Absent        bool    `json:"absent"`
+	Remarks       string  `json:"remarks"`
+}
+
+type BulkCreateResultsRequest struct {
+	Subject    string          `json:"subject" binding:"required"`
+	ExamName   string          `json:"exam_name" binding:"required"`
+	ExamDate   string          `json:"exam_date" binding:"required"`
+	MarksTotal float64         `json:"marks_total" binding:"required,min=1"`
+	Rows       []BulkResultRow `json:"rows" binding:"required,min=1,dive"`
 }
 
 type ResultSubjectSummary struct {

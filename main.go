@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -8,6 +9,7 @@ import (
 
 	"edunova-server/config"
 	"edunova-server/database"
+	"edunova-server/handlers"
 	"edunova-server/routes"
 )
 
@@ -15,6 +17,8 @@ func main() {
 	config.Load()
 	database.Connect()
 	defer database.Close()
+
+	go handlers.BackfillInvoices(context.Background())
 
 	r := gin.Default()
 	routes.SetupRoutes(r)

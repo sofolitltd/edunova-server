@@ -30,7 +30,7 @@ func storeNotification(ctx context.Context, title, body, target string, targetID
 	var notifID int
 	err := database.DB.QueryRow(ctx,
 		`INSERT INTO notifications (title, body, target, target_id, link_type, link_id, sent_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, 0)) RETURNING id`,
 		title, body, target, targetID, linkType, linkID, sentBy,
 	).Scan(&notifID)
 	if err != nil {

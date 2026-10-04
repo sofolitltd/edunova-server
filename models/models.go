@@ -22,6 +22,7 @@ type User struct {
 	School             string    `json:"school"`
 	PresentAddress     string    `json:"present_address"`
 	PermanentAddress   string    `json:"permanent_address"`
+	PhotoURL           string    `json:"photo_url"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -96,6 +97,7 @@ type UpdateUserProfileRequest struct {
 	School             string `json:"school"`
 	PresentAddress     string `json:"present_address"`
 	PermanentAddress   string `json:"permanent_address"`
+	PhotoURL           string `json:"photo_url"`
 }
 
 type Attendance struct {
@@ -137,6 +139,7 @@ type Holiday struct {
 	ID        int       `json:"id"`
 	Date      string    `json:"date"`
 	Reason    string    `json:"reason"`
+	Source    string    `json:"source"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -229,8 +232,13 @@ type Lesson struct {
 	Description  string    `json:"description"`
 	Subject      string    `json:"subject"`
 	Chapter      string    `json:"chapter"`
+	ChapterID    int       `json:"chapter_id"`
+	Topic        string    `json:"topic"`
+	TopicID      int       `json:"topic_id"`
 	LessonDate   string    `json:"lesson_date"`
 	TeacherNotes string    `json:"teacher_notes"`
+	Kind         string    `json:"kind"`
+	LinkURL      string    `json:"link_url"`
 	CreatedBy    int       `json:"created_by"`
 	CreatedAt    time.Time `json:"created_at"`
 }
@@ -242,8 +250,13 @@ type CreateLessonRequest struct {
 	Description  string `json:"description"`
 	Subject      string `json:"subject"`
 	Chapter      string `json:"chapter"`
+	ChapterID    int    `json:"chapter_id"`
+	Topic        string `json:"topic"`
+	TopicID      int    `json:"topic_id"`
 	LessonDate   string `json:"lesson_date" binding:"required"`
 	TeacherNotes string `json:"teacher_notes"`
+	Kind         string `json:"kind" binding:"omitempty,oneof=lesson video homework"`
+	LinkURL      string `json:"link_url"`
 }
 
 // Digital Fee Payment
@@ -335,4 +348,15 @@ type Notification struct {
 type NotificationWithRead struct {
 	Notification
 	ReadByMe bool `json:"read_by_me"`
+}
+
+type PresignUploadRequest struct {
+	Purpose     string `json:"purpose" binding:"required"`
+	ContentType string `json:"content_type" binding:"required"`
+	Size        int64  `json:"size" binding:"required"`
+}
+
+type PresignUploadResponse struct {
+	UploadURL string `json:"upload_url"`
+	PublicURL string `json:"public_url"`
 }

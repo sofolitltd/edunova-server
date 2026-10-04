@@ -7,6 +7,8 @@ type Teacher struct {
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"-"`
 	FullName     string    `json:"full_name"`
+	Nickname     string    `json:"nickname"`
+	Gender       string    `json:"gender"`
 	Phone        string    `json:"phone"`
 	Education    string    `json:"education"`
 	Bio          string    `json:"bio"`
@@ -32,6 +34,8 @@ type CreateTeacherRequest struct {
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required,min=6"`
 	FullName string `json:"full_name" binding:"required"`
+	Nickname string `json:"nickname"`
+	Gender   string `json:"gender" binding:"omitempty,oneof=male female"`
 }
 
 type UpdateTeacherProfileRequest struct {
@@ -44,6 +48,8 @@ type UpdateTeacherProfileRequest struct {
 // only touches full_name/email).
 type AdminUpdateTeacherRequest struct {
 	FullName  string  `json:"full_name" binding:"required,min=2"`
+	Nickname  string  `json:"nickname"`
+	Gender    string  `json:"gender" binding:"omitempty,oneof=male female"`
 	Email     string  `json:"email" binding:"required,email"`
 	Phone     string  `json:"phone"`
 	Education string  `json:"education"`
@@ -85,4 +91,36 @@ type TeacherBatch struct {
 	Schedule     string `json:"schedule"`
 	StudentCount int    `json:"student_count"`
 	CourseID     int    `json:"course_id"`
+}
+
+// TeacherDisplayNameEn is the English form used on the printable routine,
+// e.g. "Tushar Sir" / "Ayesha Ma'am".
+func TeacherDisplayNameEn(fullName, nickname, gender string) string {
+	name := nickname
+	if name == "" {
+		name = fullName
+	}
+	switch gender {
+	case "male":
+		return name + " Sir"
+	case "female":
+		return name + " Ma'am"
+	}
+	return name
+}
+
+// TeacherDisplayName is how students address a teacher: the nickname (or full
+// name when there is none) plus "স্যার"/"ম্যাম" by gender, e.g. "তুষার স্যার".
+func TeacherDisplayName(fullName, nickname, gender string) string {
+	name := nickname
+	if name == "" {
+		name = fullName
+	}
+	switch gender {
+	case "male":
+		return name + " স্যার"
+	case "female":
+		return name + " ম্যাম"
+	}
+	return name
 }

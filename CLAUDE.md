@@ -15,7 +15,7 @@ There is no test suite, linter config, or CI in this repo currently. `go vet` an
 
 This directory is not a git repository — if the user asks you to commit, ask them how they want it tracked first.
 
-Required `.env` vars: `DATABASE_URL` (Neon PostgreSQL), `PORT` (default 8080), `JWT_SECRET`, plus optional `SMS_API_KEY`/`SMS_SENDER_ID`/`SMS_API_URL` (bulksmsbd.net) and `FCM_SERVER_KEY`/`FCM_SERVICE_ACCOUNT`/`FCM_PROJECT_ID` for push notifications. See `config/config.go` for defaults.
+Required `.env` vars: `DATABASE_URL` (Neon PostgreSQL), `PORT` (default 8080), `JWT_SECRET`, plus optional `SMS_API_KEY`/`SMS_SENDER_ID`/`SMS_API_URL` (bulksmsbd.net) and `FCM_SERVER_KEY`/`FCM_SERVICE_ACCOUNT`/`FCM_PROJECT_ID` for push notifications. Image uploads use presigned PUT URLs (`services/storage.go`, any S3-compatible store — Neon, R2, MinIO): set `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` (`auto` for R2) and optionally `S3_PUBLIC_BASE_URL` (CDN/custom domain used to build stored image URLs). See `config/config.go` for defaults.
 
 ## Sibling repos
 
@@ -48,6 +48,14 @@ Plain layered structure, no framework conventions beyond gin: `main.go` → `rou
 ## Question bank domain
 
 Deepest/most complex feature — hierarchy is `Class → Subject → Book → Chapter → Topic`, each its own table with `id`, `name`, `name_bn`, `order_index`, referenced by nullable FKs on `questions`. Question types: `mcq, short_answer, very_short_answer, fill_blank, true_false, matching, descriptive, creative, problem_solving`; lifecycle status `draft → published → archived`. Bulk CSV import (both for the hierarchy and for questions) writes an audit row to `question_imports` and does two-pass duplicate detection (exact text match, then normalized — lowercased/depunctuated/whitespace-collapsed match) with row-level error reporting; there's no AI/semantic similarity check.
+
+## Invoices
+
+Invoices are an immutable ledger (`invoices` table, `handlers/invoice.go`). A snapshot (`models.InvoiceSnapshot`: student, batch, fee lines, discount, totals, amount in words) is issued **once**, when the money event happens: `AdminDirectEnroll` / `AdminUpdateEnrollmentStatus` (→ `admission`, only for approved batch enrollments) and `AdminVerifyPayment` (→ `payment`, only for verified payments). Clients render the snapshot JSON and never recompute totals; fee/profile edits after issue do not change old invoices. Numbers are deterministic and backward-compatible: `INV-%05d` of the enrollment id, and the payment's `receipt_number` (or `RCPT-%05d`).
+
+- Issuing is idempotent (partial unique indexes + `ON CONFLICT DO NOTHING`). A failed eager issue is only logged; the invoice is then issued on first request or by `BackfillInvoices` (runs in a goroutine at startup). Backfilled/lazily-issued rows for pre-ledger data use the data as of that moment.
+- Endpoints: user `GET /api/{payments,enrollments}/:id/invoice`, `GET /api/invoices/:id[/pdf]` (ownership enforced); admin the same under `/api/admin`.
+- PDFs are **not stored**. `/pdf[?copies=double]` draws the snapshot directly with `go-pdf/fpdf` (`services/invoice_pdf.go`, embedded Noto Sans + Noto Sans Bengali fonts in `services/fonts/`) — no external service. fpdf does no complex text shaping, so Bangla letters render but conjuncts/vowel signs may not reorder; labels and amounts are Latin and unaffected. If Bangla names must be perfect, swap the renderer behind the same endpoint for a browser-engine HTML→PDF service (e.g. Gotenberg). Optional issuer details: `INVOICE_ISSUER_NAME` (default `EduNova`), `INVOICE_ISSUER_ADDRESS`, `INVOICE_ISSUER_PHONE`.
 
 ## Notifications
 

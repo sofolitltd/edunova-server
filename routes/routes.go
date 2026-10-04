@@ -36,11 +36,13 @@ func SetupRoutes(r *gin.Engine) {
 		{
 			auth.GET("/user", handlers.GetUser)
 			auth.PUT("/user/profile", handlers.UpdateUserProfile)
+			auth.POST("/uploads/presign", handlers.UserPresignUpload)
 			auth.PUT("/change-password", handlers.ChangePassword)
 			auth.GET("/user/enrollments", handlers.GetUserEnrollments)
 			auth.GET("/batches/suggested", handlers.UserGetSuggestedBatches)
 			auth.GET("/batches/:id", handlers.UserGetBatchDetail)
 			auth.GET("/batches/:id/subjects", handlers.UserGetBatchSubjects)
+			auth.GET("/batches/:id/lessons", handlers.UserGetBatchLessons)
 			auth.GET("/batches/:id/exams", handlers.UserGetBatchExams)
 			auth.GET("/batches/:id/leaderboard", handlers.UserGetBatchLeaderboard)
 			auth.GET("/batches/:id/my-results", handlers.UserGetBatchMyResults)
@@ -48,6 +50,10 @@ func SetupRoutes(r *gin.Engine) {
 			auth.GET("/batches/:id/notices", handlers.UserGetBatchNotices)
 			auth.GET("/batches/:id/payments", handlers.UserGetBatchPayments)
 			auth.POST("/batches/:id/payments", handlers.UserPayBatchFee)
+			auth.GET("/payments/:id/invoice", handlers.UserGetPaymentInvoice)
+			auth.GET("/enrollments/:id/invoice", handlers.UserGetEnrollmentInvoice)
+			auth.GET("/invoices/:id", handlers.UserGetInvoice)
+			auth.GET("/invoices/:id/pdf", handlers.UserGetInvoicePDF)
 			auth.GET("/user/dashboard", handlers.GetUserDashboardStats)
 			auth.GET("/user/free-courses", handlers.GetUserFreeCourses)
 			auth.POST("/device-token", handlers.RegisterDeviceToken)
@@ -64,6 +70,9 @@ func SetupRoutes(r *gin.Engine) {
 			auth.GET("/results", handlers.UserGetResults)
 			auth.GET("/results/summary", handlers.UserGetResultSummary)
 			auth.GET("/attendance/my", handlers.UserGetMyAttendance)
+			auth.GET("/holidays/upcoming", handlers.UserGetUpcomingHolidays)
+			auth.GET("/sms-opt-in", handlers.UserGetSMSOptIn)
+			auth.PUT("/sms-opt-in", handlers.UserSetSMSOptIn)
 			auth.GET("/notes", handlers.UserGetNotes)
 			auth.GET("/notes/:id", handlers.UserGetNoteByID)
 			auth.GET("/daily-content", handlers.UserGetDailyContent)
@@ -145,6 +154,7 @@ func SetupRoutes(r *gin.Engine) {
 
 			secured.POST("/books", handlers.AdminCreateBook)
 			secured.PUT("/books/:id", handlers.AdminUpdateBook)
+			secured.POST("/books/:id/clone", handlers.AdminCloneBook)
 			secured.DELETE("/books/:id", handlers.AdminDeleteBook)
 
 			secured.POST("/chapters", handlers.AdminCreateChapter)
@@ -218,6 +228,10 @@ func SetupRoutes(r *gin.Engine) {
 			secured.PUT("/payments/:id/verify", handlers.AdminVerifyPayment)
 			secured.PUT("/payments/:id/reject", handlers.AdminRejectPayment)
 			secured.DELETE("/payments/:id", handlers.AdminDeletePayment)
+			secured.GET("/payments/:id/invoice", handlers.AdminGetPaymentInvoice)
+			secured.GET("/enrollments/:id/invoice", handlers.AdminGetEnrollmentInvoice)
+			secured.GET("/invoices/:id", handlers.AdminGetInvoice)
+			secured.GET("/invoices/:id/pdf", handlers.AdminGetInvoicePDF)
 
 			// Articles / Parenting Hub
 			secured.GET("/articles", handlers.AdminGetArticles)
@@ -258,7 +272,7 @@ func SetupRoutes(r *gin.Engine) {
 
 			// Batch <-> subject assignment + per-subject weekly schedule
 			// (a subject can have several entries, one per class period)
-			secured.GET("/batches/:id/subjects", handlers.AdminGetBatchSubjects)
+			secured.GET("/batches/:id/teacher-history", handlers.AdminGetBatchTeacherHistory)
 			secured.POST("/batches/:id/subjects", handlers.AdminAssignBatchSubject)
 			secured.PUT("/batches/:id/subjects/:entryId", handlers.AdminUpdateBatchSubject)
 			secured.DELETE("/batches/:id/subjects/:entryId", handlers.AdminUnassignBatchSubject)
@@ -307,6 +321,7 @@ func SetupRoutes(r *gin.Engine) {
 		{
 			staff.GET("/courses", handlers.AdminGetCourses)
 			staff.GET("/users/search", handlers.AdminSearchUsers)
+			staff.POST("/uploads/presign", handlers.AdminPresignUpload)
 
 			// Attendance
 			staff.GET("/students", handlers.AdminGetStudents)
@@ -324,6 +339,7 @@ func SetupRoutes(r *gin.Engine) {
 			staff.PUT("/doubts/:id/close", handlers.AdminCloseDoubt)
 
 			// Lessons
+			staff.GET("/batches/:id/subjects", handlers.AdminGetBatchSubjects)
 			staff.GET("/lessons", handlers.AdminGetLessons)
 			staff.GET("/lessons/today", handlers.AdminGetTodayLessons)
 			staff.POST("/lessons", handlers.AdminCreateLesson)
@@ -349,6 +365,7 @@ func SetupRoutes(r *gin.Engine) {
 			// Results / Progress
 			staff.GET("/results", handlers.AdminGetResults)
 			staff.POST("/results", handlers.AdminCreateResult)
+			staff.POST("/results/bulk", handlers.AdminBulkCreateResults)
 			staff.PUT("/results/:id", handlers.AdminUpdateResult)
 			staff.DELETE("/results/:id", handlers.AdminDeleteResult)
 

@@ -74,6 +74,7 @@ func runMigrations() {
 	runCalendarMigration()
 	runLessonsMigration()
 	runPaymentsMigration()
+	runInvoicesMigration()
 	runParentingHubMigration()
 	runNotificationsHistoryMigration()
 	runLiveExamMigration()
@@ -205,6 +206,7 @@ func runCourseMigration() {
 		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS batch_id INT REFERENCES batches(id) ON DELETE SET NULL`,
 		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS student_id VARCHAR(30) NOT NULL DEFAULT ''`,
 		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(100) DEFAULT ''`,
+		`ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS fee_breakdown JSONB`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_student_id ON enrollments (student_id) WHERE student_id <> ''`,
 	}
 
@@ -264,6 +266,18 @@ func runQuestionBankMigration() {
 	_, err := DB.Exec(context.Background(), hierarchy)
 	if err != nil {
 		log.Fatalf("Unable to run question bank hierarchy migrations: %v", err)
+	}
+
+	// Book editions: a new year's book is a clone of the old one (see
+	// AdminCloneBook); the old edition is archived, never edited in place.
+	for _, q := range []string{
+		`ALTER TABLE books ADD COLUMN IF NOT EXISTS academic_year INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE books ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE books ADD COLUMN IF NOT EXISTS replaces_book_id INT REFERENCES books(id) ON DELETE SET NULL`,
+	} {
+		if _, err := DB.Exec(context.Background(), q); err != nil {
+			log.Printf("Warning: failed to alter books table: %v", err)
+		}
 	}
 
 	_, err = DB.Exec(context.Background(), `ALTER TABLE classes ADD COLUMN IF NOT EXISTS code VARCHAR(2) DEFAULT ''`)
@@ -419,6 +433,8 @@ func runTeacherMigration() {
 		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS photo_url TEXT DEFAULT ''`,
 		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS join_date DATE`,
 		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS leave_date DATE`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS nickname VARCHAR(100) DEFAULT ''`,
+		`ALTER TABLE teachers ADD COLUMN IF NOT EXISTS gender VARCHAR(10) DEFAULT ''`,
 	}
 	for _, q := range alters {
 		if _, err := DB.Exec(context.Background(), q); err != nil {
@@ -469,6 +485,34 @@ func runBatchSubjectMigration() {
 	ALTER TABLE batch_subjects DROP CONSTRAINT IF EXISTS batch_subjects_batch_id_subject_id_key`)
 	if err != nil {
 		log.Printf("Warning: failed to drop batch_subjects unique constraint: %v", err)
+	}
+
+	// Who taught a batch's subject, and when. teacher_name is a snapshot, so
+	// renaming or deleting a teacher later never rewrites past history.
+	_, err = DB.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS batch_subject_teacher_history (
+		id SERIAL PRIMARY KEY,
+		batch_id INT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+		subject_id INT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+		batch_subject_id INT REFERENCES batch_subjects(id) ON DELETE SET NULL,
+		teacher_id INT REFERENCES teachers(id) ON DELETE SET NULL,
+		teacher_name VARCHAR(255) NOT NULL DEFAULT '',
+		from_date DATE NOT NULL,
+		to_date DATE,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	)`)
+	if err != nil {
+		log.Printf("Warning: failed to create batch_subject_teacher_history table: %v", err)
+	}
+	_, _ = DB.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_bst_history_batch ON batch_subject_teacher_history(batch_id)`)
+	_, err = DB.Exec(context.Background(), `
+	INSERT INTO batch_subject_teacher_history (batch_id, subject_id, batch_subject_id, teacher_id, teacher_name, from_date)
+	SELECT bs.batch_id, bs.subject_id, bs.id, bs.teacher_id, t.full_name, COALESCE(bs.created_at::date, CURRENT_DATE)
+	FROM batch_subjects bs
+	JOIN teachers t ON t.id = bs.teacher_id
+	WHERE NOT EXISTS (SELECT 1 FROM batch_subject_teacher_history h WHERE h.batch_subject_id = bs.id)`)
+	if err != nil {
+		log.Printf("Warning: failed to backfill batch_subject_teacher_history: %v", err)
 	}
 }
 
@@ -1064,6 +1108,8 @@ func runAttendanceMigration() {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS mother_name VARCHAR(255) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS mother_mobile VARCHAR(20) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_mobile VARCHAR(20) DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS sms_opt_in BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_result_sms_on DATE`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(20) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS religion VARCHAR(50) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS student_class VARCHAR(50) DEFAULT ''`,
@@ -1072,6 +1118,7 @@ func runAttendanceMigration() {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS present_address TEXT DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS permanent_address TEXT DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255) DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255) DEFAULT ''`,
 	}
@@ -1196,6 +1243,22 @@ func runLessonsMigration() {
 	if err != nil {
 		log.Printf("Warning: failed to create lessons table: %v", err)
 	}
+	// kind: lesson (class note), video, homework; link_url is an optional
+	// YouTube/Drive/etc. link for the guardian-facing study feed.
+	for _, q := range []string{
+		`ALTER TABLE lessons ADD COLUMN IF NOT EXISTS kind VARCHAR(20) NOT NULL DEFAULT 'lesson'`,
+		`ALTER TABLE lessons ADD COLUMN IF NOT EXISTS link_url TEXT DEFAULT ''`,
+		// Curriculum link. chapter/topic text stay as a snapshot of the names at
+		// posting time, so renaming or deleting curriculum never rewrites history.
+		`ALTER TABLE lessons ADD COLUMN IF NOT EXISTS topic VARCHAR(255) DEFAULT ''`,
+		`ALTER TABLE lessons ADD COLUMN IF NOT EXISTS chapter_id INT REFERENCES chapters(id) ON DELETE SET NULL`,
+		`ALTER TABLE lessons ADD COLUMN IF NOT EXISTS topic_id INT REFERENCES topics(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_lessons_batch_date ON lessons(batch_id, lesson_date DESC)`,
+	} {
+		if _, err := DB.Exec(ctx, q); err != nil {
+			log.Printf("Warning: failed to alter lessons table: %v", err)
+		}
+	}
 	fmt.Println("Lessons migration completed")
 }
 
@@ -1227,6 +1290,36 @@ func runPaymentsMigration() {
 	_, _ = DB.Exec(ctx, `ALTER TABLE payments ADD COLUMN IF NOT EXISTS batch_id INT REFERENCES batches(id) ON DELETE SET NULL`)
 	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_payments_batch_id ON payments(batch_id)`)
 	fmt.Println("Payments migration completed")
+}
+
+// runInvoicesMigration creates the immutable invoice ledger. Source rows are
+// ON DELETE SET NULL so an invoice outlives a deleted enrollment/payment.
+func runInvoicesMigration() {
+	ctx := context.Background()
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS invoices (
+			id SERIAL PRIMARY KEY,
+			kind VARCHAR(20) NOT NULL,
+			number VARCHAR(100) NOT NULL,
+			enrollment_id INT REFERENCES enrollments(id) ON DELETE SET NULL,
+			payment_id INT REFERENCES payments(id) ON DELETE SET NULL,
+			user_id INT REFERENCES users(id) ON DELETE SET NULL,
+			batch_id INT REFERENCES batches(id) ON DELETE SET NULL,
+			total DECIMAL(10,2) NOT NULL DEFAULT 0,
+			snapshot JSONB NOT NULL,
+			issued_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_enrollment ON invoices(enrollment_id) WHERE kind = 'admission'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_payment ON invoices(payment_id) WHERE kind = 'payment'`,
+		`CREATE INDEX IF NOT EXISTS idx_invoices_user ON invoices(user_id, issued_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_invoices_number ON invoices(number)`,
+	} {
+		if _, err := DB.Exec(ctx, q); err != nil {
+			log.Printf("Warning: failed to run invoices migration: %v", err)
+		}
+	}
+	fmt.Println("Invoices migration completed")
 }
 
 func runParentingHubMigration() {
@@ -2423,6 +2516,7 @@ func runResultsMigration() {
 	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_results_user ON student_results(user_id)`)
 	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_results_subject ON student_results(subject)`)
 	_, _ = DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_results_date ON student_results(exam_date)`)
+	_, _ = DB.Exec(ctx, `ALTER TABLE student_results ADD COLUMN IF NOT EXISTS absent BOOLEAN NOT NULL DEFAULT false`)
 	fmt.Println("Results migration completed")
 }
 

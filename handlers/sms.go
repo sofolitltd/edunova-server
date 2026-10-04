@@ -194,3 +194,57 @@ func AdminSendSMS(c *gin.Context) {
 
 	c.JSON(http.StatusOK, resp)
 }
+
+// guardianSMSNumber is where result SMS go: the account's dedicated
+// notification number, else the father's, else the account's own mobile.
+const guardianSMSNumber = `COALESCE(NULLIF(notification_mobile,''), NULLIF(father_mobile,''), mobile)`
+
+// UserGetSMSOptIn reports whether result SMS are enabled for the caller and
+// the number they would go to.
+func UserGetSMSOptIn(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	var enabled bool
+	var mobile string
+	err := database.DB.QueryRow(context.Background(),
+		`SELECT sms_opt_in, `+guardianSMSNumber+` FROM users WHERE id = $1`, userID).Scan(&enabled, &mobile)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "user not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"enabled": enabled, "mobile": mobile})
+}
+
+// UserSetSMSOptIn lets the guardian turn result SMS on or off.
+func UserSetSMSOptIn(c *gin.Context) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	if _, err := database.DB.Exec(context.Background(),
+		`UPDATE users SET sms_opt_in = $1 WHERE id = $2`, req.Enabled, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"enabled": req.Enabled})
+}
+
+// sendResultSMS texts the guardian about a new result, at most once per
+// student per day (the day's slot is claimed atomically, and released if the
+// send fails) so SMS cost stays bounded; push covers everything else.
+func sendResultSMS(ctx context.Context, userID int, text string) {
+	var mobile string
+	err := database.DB.QueryRow(ctx,
+		`UPDATE users SET last_result_sms_on = CURRENT_DATE
+		 WHERE id = $1 AND sms_opt_in AND (last_result_sms_on IS NULL OR last_result_sms_on < CURRENT_DATE)
+		 RETURNING `+guardianSMSNumber, userID).Scan(&mobile)
+	if err != nil {
+		return
+	}
+	if err := services.SendSMS(mobile, text); err != nil {
+		_, _ = database.DB.Exec(ctx, `UPDATE users SET last_result_sms_on = NULL WHERE id = $1`, userID)
+	}
+}

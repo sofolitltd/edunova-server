@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"edunova-server/database"
 	"edunova-server/models"
@@ -314,6 +316,9 @@ func AdminCreateBatch(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+	if !requireEnglishText(c, textField{"Batch name", req.Name}) {
+		return
+	}
 
 	if req.Status == "" {
 		req.Status = "active"
@@ -372,6 +377,9 @@ func AdminUpdateBatch(c *gin.Context) {
 	var req models.CreateBatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	if !requireEnglishText(c, textField{"Batch name", req.Name}) {
 		return
 	}
 
@@ -439,9 +447,13 @@ func AdminDeleteBatch(c *gin.Context) {
 
 func AdminGetBatchSubjects(c *gin.Context) {
 	batchID := c.Param("id")
+	if id, err := strconv.Atoi(batchID); err != nil || !teacherCanUseBatchID(c, id) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not authorized for this batch"})
+		return
+	}
 
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT bs.id, bs.subject_id, s.name, bs.teacher_id, COALESCE(t.full_name, ''), COALESCE(bs.days, '{}'), COALESCE(bs.start_time, ''), COALESCE(bs.end_time, '')
+		`SELECT bs.id, bs.subject_id, s.name, bs.teacher_id, COALESCE(t.full_name, ''), COALESCE(t.nickname, ''), COALESCE(t.gender, ''), COALESCE(bs.days, '{}'), COALESCE(bs.start_time, ''), COALESCE(bs.end_time, '')
 		 FROM batch_subjects bs
 		 JOIN subjects s ON bs.subject_id = s.id
 		 LEFT JOIN teachers t ON bs.teacher_id = t.id
@@ -456,9 +468,12 @@ func AdminGetBatchSubjects(c *gin.Context) {
 	var subjects []models.BatchSubject
 	for rows.Next() {
 		var s models.BatchSubject
-		if err := rows.Scan(&s.ID, &s.SubjectID, &s.SubjectName, &s.TeacherID, &s.TeacherName, &s.Days, &s.StartTime, &s.EndTime); err != nil {
+		var nickname, gender string
+		if err := rows.Scan(&s.ID, &s.SubjectID, &s.SubjectName, &s.TeacherID, &s.TeacherName, &nickname, &gender, &s.Days, &s.StartTime, &s.EndTime); err != nil {
 			continue
 		}
+		s.TeacherDisplayName = models.TeacherDisplayName(s.TeacherName, nickname, gender)
+		s.TeacherDisplayNameEn = models.TeacherDisplayNameEn(s.TeacherName, nickname, gender)
 		subjects = append(subjects, s)
 	}
 	if subjects == nil {
@@ -479,9 +494,29 @@ func AdminAssignBatchSubject(c *gin.Context) {
 		return
 	}
 
-	_, err := database.DB.Exec(context.Background(),
-		`INSERT INTO batch_subjects (batch_id, subject_id, teacher_id, days, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6)`,
-		batchID, req.SubjectID, req.TeacherID, req.Days, req.StartTime, req.EndTime)
+	batch, err := strconv.Atoi(batchID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid batch id"})
+		return
+	}
+	ctx := context.Background()
+	tx, err := database.DB.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var entryID int
+	err = tx.QueryRow(ctx,
+		`INSERT INTO batch_subjects (batch_id, subject_id, teacher_id, days, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		batchID, req.SubjectID, req.TeacherID, req.Days, req.StartTime, req.EndTime).Scan(&entryID)
+	if err == nil {
+		err = recordTeacherChange(ctx, tx, batch, entryID, req.SubjectID, req.TeacherID)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to assign subject"})
 		return
@@ -501,16 +536,41 @@ func AdminUpdateBatchSubject(c *gin.Context) {
 		return
 	}
 
-	tag, err := database.DB.Exec(context.Background(),
-		`UPDATE batch_subjects SET subject_id = $1, teacher_id = $2, days = $3, start_time = $4, end_time = $5
-		 WHERE id = $6 AND batch_id = $7`,
-		req.SubjectID, req.TeacherID, req.Days, req.StartTime, req.EndTime, entryID, batchID)
+	ctx := context.Background()
+	tx, err := database.DB.Begin(ctx)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update subject"})
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	defer tx.Rollback(ctx)
+
+	var oldSubjectID int
+	var oldTeacherID *int
+	err = tx.QueryRow(ctx,
+		`SELECT subject_id, teacher_id FROM batch_subjects WHERE id = $1 AND batch_id = $2 FOR UPDATE`,
+		entryID, batchID).Scan(&oldSubjectID, &oldTeacherID)
+	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "assignment not found"})
+		return
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx,
+			`UPDATE batch_subjects SET subject_id = $1, teacher_id = $2, days = $3, start_time = $4, end_time = $5
+			 WHERE id = $6 AND batch_id = $7`,
+			req.SubjectID, req.TeacherID, req.Days, req.StartTime, req.EndTime, entryID, batchID)
+	}
+	teacherChanged := (oldTeacherID == nil) != (req.TeacherID == nil) ||
+		(oldTeacherID != nil && req.TeacherID != nil && *oldTeacherID != *req.TeacherID)
+	if err == nil && (teacherChanged || oldSubjectID != req.SubjectID) {
+		entry, _ := strconv.Atoi(entryID)
+		batch, _ := strconv.Atoi(batchID)
+		err = recordTeacherChange(ctx, tx, batch, entry, req.SubjectID, req.TeacherID)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to update subject"})
 		return
 	}
 	c.JSON(http.StatusOK, models.SuccessResponse{Message: "subject updated"})
@@ -520,8 +580,24 @@ func AdminUnassignBatchSubject(c *gin.Context) {
 	batchID := c.Param("id")
 	entryID := c.Param("entryId")
 
-	tag, err := database.DB.Exec(context.Background(),
-		`DELETE FROM batch_subjects WHERE id = $1 AND batch_id = $2`, entryID, batchID)
+	ctx := context.Background()
+	tx, err := database.DB.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx,
+		`UPDATE batch_subject_teacher_history SET to_date = `+todayInDhaka+`
+		 WHERE batch_subject_id = $1 AND batch_id = $2 AND to_date IS NULL`, entryID, batchID)
+	var tag pgconn.CommandTag
+	if err == nil {
+		tag, err = tx.Exec(ctx, `DELETE FROM batch_subjects WHERE id = $1 AND batch_id = $2`, entryID, batchID)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
 		return
@@ -569,4 +645,51 @@ func AdminGetBatchStats(c *gin.Context) {
 		stats = []BatchStat{}
 	}
 	c.JSON(http.StatusOK, stats)
+}
+
+const todayInDhaka = `(NOW() AT TIME ZONE 'Asia/Dhaka')::date`
+
+// recordTeacherChange closes the schedule entry's open teacher-history row (if
+// any) and opens a new one for teacherID, so the previous teacher stays on
+// record with the dates they actually taught.
+func recordTeacherChange(ctx context.Context, tx pgx.Tx, batchID, entryID, subjectID int, teacherID *int) error {
+	if _, err := tx.Exec(ctx,
+		`UPDATE batch_subject_teacher_history SET to_date = `+todayInDhaka+`
+		 WHERE batch_subject_id = $1 AND to_date IS NULL`, entryID); err != nil {
+		return err
+	}
+	if teacherID == nil {
+		return nil
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO batch_subject_teacher_history (batch_id, subject_id, batch_subject_id, teacher_id, teacher_name, from_date)
+		 SELECT $1, $2, $3, t.id, t.full_name, `+todayInDhaka+` FROM teachers t WHERE t.id = $4`,
+		batchID, subjectID, entryID, *teacherID)
+	return err
+}
+
+// AdminGetBatchTeacherHistory lists who has taught each subject of a batch and
+// over which dates, newest first within each subject.
+func AdminGetBatchTeacherHistory(c *gin.Context) {
+	rows, err := database.DB.Query(context.Background(),
+		`SELECT h.id, h.subject_id, s.name, h.teacher_id, h.teacher_name, h.from_date::text, h.to_date::text
+		 FROM batch_subject_teacher_history h
+		 JOIN subjects s ON s.id = h.subject_id
+		 WHERE h.batch_id = $1
+		 ORDER BY s.name ASC, h.from_date DESC, h.id DESC`, c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	history := []models.BatchTeacherHistoryEntry{}
+	for rows.Next() {
+		var e models.BatchTeacherHistoryEntry
+		if err := rows.Scan(&e.ID, &e.SubjectID, &e.SubjectName, &e.TeacherID, &e.TeacherName, &e.FromDate, &e.ToDate); err != nil {
+			continue
+		}
+		history = append(history, e)
+	}
+	c.JSON(http.StatusOK, history)
 }

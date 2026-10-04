@@ -41,36 +41,39 @@ func UserGetBatchDetail(c *gin.Context) {
 	}
 
 	var (
-		name, schedule, classLevel, shift, batchType, courseTitle, courseDesc string
-		days                                                                  []string
-		startTime, endTime                                                    string
-		courseID                                                              int
+		name, code, schedule, classLevel, shift, batchType, courseTitle, courseDesc string
+		days                                                                        []string
+		startTime, endTime                                                          string
+		courseID                                                                    int
 	)
 	err = database.DB.QueryRow(ctx,
-		`SELECT b.name, COALESCE(b.days, '{}'), COALESCE(b.start_time, ''), COALESCE(b.end_time, ''),
+		`SELECT b.name, COALESCE(b.code, ''), COALESCE(b.days, '{}'), COALESCE(b.start_time, ''), COALESCE(b.end_time, ''),
 		        COALESCE(b.schedule, ''), COALESCE(b.class_level, ''), COALESCE(b.shift, ''), COALESCE(b.type, ''),
 		        COALESCE(b.course_id, 0), COALESCE(c.title, ''), COALESCE(c.description, '')
 		 FROM batches b LEFT JOIN courses c ON b.course_id = c.id
 		 WHERE b.id = $1`, batchID,
-	).Scan(&name, &days, &startTime, &endTime, &schedule, &classLevel, &shift, &batchType, &courseID, &courseTitle, &courseDesc)
+	).Scan(&name, &code, &days, &startTime, &endTime, &schedule, &classLevel, &shift, &batchType, &courseID, &courseTitle, &courseDesc)
 	if err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "batch not found"})
 		return
 	}
 
 	type teacherInfo struct {
-		ID       int    `json:"id"`
-		FullName string `json:"full_name"`
+		ID          int    `json:"id"`
+		FullName    string `json:"full_name"`
+		DisplayName string `json:"display_name"`
 	}
 	var teachers []teacherInfo
 	rows, err := database.DB.Query(ctx,
-		`SELECT t.id, t.full_name FROM batch_teachers bt JOIN teachers t ON bt.teacher_id = t.id WHERE bt.batch_id = $1`,
+		`SELECT t.id, t.full_name, COALESCE(t.nickname, ''), COALESCE(t.gender, '') FROM batch_teachers bt JOIN teachers t ON bt.teacher_id = t.id WHERE bt.batch_id = $1`,
 		batchID)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var t teacherInfo
-			if err := rows.Scan(&t.ID, &t.FullName); err == nil {
+			var nickname, gender string
+			if err := rows.Scan(&t.ID, &t.FullName, &nickname, &gender); err == nil {
+				t.DisplayName = models.TeacherDisplayName(t.FullName, nickname, gender)
 				teachers = append(teachers, t)
 			}
 		}
@@ -86,6 +89,7 @@ func UserGetBatchDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"id":                 batchID,
 		"name":               name,
+		"code":               code,
 		"days":               days,
 		"start_time":         startTime,
 		"end_time":           endTime,
@@ -170,7 +174,7 @@ func UserGetBatchSubjects(c *gin.Context) {
 	}
 
 	rows, err := database.DB.Query(ctx,
-		`SELECT bs.id, bs.subject_id, s.name, bs.teacher_id, COALESCE(t.full_name, ''), COALESCE(bs.days, '{}'), COALESCE(bs.start_time, ''), COALESCE(bs.end_time, '')
+		`SELECT bs.id, bs.subject_id, s.name, bs.teacher_id, COALESCE(t.full_name, ''), COALESCE(t.nickname, ''), COALESCE(t.gender, ''), COALESCE(bs.days, '{}'), COALESCE(bs.start_time, ''), COALESCE(bs.end_time, '')
 		 FROM batch_subjects bs
 		 JOIN subjects s ON bs.subject_id = s.id
 		 LEFT JOIN teachers t ON bs.teacher_id = t.id
@@ -185,9 +189,12 @@ func UserGetBatchSubjects(c *gin.Context) {
 	var subjects []models.BatchSubject
 	for rows.Next() {
 		var s models.BatchSubject
-		if err := rows.Scan(&s.ID, &s.SubjectID, &s.SubjectName, &s.TeacherID, &s.TeacherName, &s.Days, &s.StartTime, &s.EndTime); err != nil {
+		var nickname, gender string
+		if err := rows.Scan(&s.ID, &s.SubjectID, &s.SubjectName, &s.TeacherID, &s.TeacherName, &nickname, &gender, &s.Days, &s.StartTime, &s.EndTime); err != nil {
 			continue
 		}
+		s.TeacherDisplayName = models.TeacherDisplayName(s.TeacherName, nickname, gender)
+		s.TeacherDisplayNameEn = models.TeacherDisplayNameEn(s.TeacherName, nickname, gender)
 		subjects = append(subjects, s)
 	}
 	if subjects == nil {
@@ -512,4 +519,58 @@ func UserPayBatchFee(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, p)
+}
+
+// UserGetBatchLessons is the batch's study feed: class notes, videos and
+// homework teachers have posted, newest first.
+func UserGetBatchLessons(c *gin.Context) {
+	mobile := c.GetString("mobile")
+	batchID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid batch id"})
+		return
+	}
+
+	ctx := context.Background()
+	if !userEnrolledInBatch(ctx, mobile, batchID) {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not enrolled in this batch"})
+		return
+	}
+
+	rows, err := database.DB.Query(ctx,
+		`SELECT id, title, COALESCE(description, ''), COALESCE(subject, ''), COALESCE(chapter, ''), COALESCE(chapter_id, 0), COALESCE(topic, ''),
+		        lesson_date::text, COALESCE(teacher_notes, ''), COALESCE(kind, 'lesson'), COALESCE(link_url, ''), created_at
+		 FROM lessons
+		 WHERE batch_id = $1
+		 ORDER BY lesson_date DESC, created_at DESC
+		 LIMIT 200`, batchID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer rows.Close()
+
+	type lessonInfo struct {
+		ID           int       `json:"id"`
+		Title        string    `json:"title"`
+		Description  string    `json:"description"`
+		Subject      string    `json:"subject"`
+		Chapter      string    `json:"chapter"`
+		ChapterID    int       `json:"chapter_id"`
+		Topic        string    `json:"topic"`
+		LessonDate   string    `json:"lesson_date"`
+		TeacherNotes string    `json:"teacher_notes"`
+		Kind         string    `json:"kind"`
+		LinkURL      string    `json:"link_url"`
+		CreatedAt    time.Time `json:"created_at"`
+	}
+	lessons := []lessonInfo{}
+	for rows.Next() {
+		var l lessonInfo
+		if err := rows.Scan(&l.ID, &l.Title, &l.Description, &l.Subject, &l.Chapter, &l.ChapterID, &l.Topic, &l.LessonDate,
+			&l.TeacherNotes, &l.Kind, &l.LinkURL, &l.CreatedAt); err == nil {
+			lessons = append(lessons, l)
+		}
+	}
+	c.JSON(http.StatusOK, lessons)
 }

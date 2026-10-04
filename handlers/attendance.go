@@ -405,9 +405,61 @@ func AdminGetBatchMonthlyAttendance(c *gin.Context) {
 	})
 }
 
+// UserGetUpcomingHolidays lists the caller's holidays from a local date (sent
+// by the client, so the server's timezone doesn't shift it) over the next
+// `days` days: global entries in holidays, plus calendar "holiday" events that
+// cover a day and apply to the caller's batch/course (or to everyone).
+func UserGetUpcomingHolidays(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	days, err := strconv.Atoi(c.DefaultQuery("days", "7"))
+	if err != nil || days < 0 || days > 14 {
+		days = 7
+	}
+	rows, err := database.DB.Query(context.Background(),
+		`WITH days AS (
+			SELECT d::date AS day FROM generate_series($1::date, $1::date + $3::int, interval '1 day') d
+		)
+		SELECT DISTINCT ON (day) day::text, reason FROM (
+			SELECT d.day, COALESCE(h.reason, '') AS reason, 0 AS prio
+			FROM days d JOIN holidays h ON h.date = d.day
+			UNION ALL
+			SELECT d.day, ce.title, 1
+			FROM days d JOIN calendar_events ce
+			  ON ce.event_type = 'holiday' AND d.day BETWEEN ce.date AND COALESCE(ce.end_date, ce.date)
+			 AND ((ce.batch_id IS NULL AND ce.course_id IS NULL)
+			   OR ce.batch_id IN (SELECT batch_id FROM enrollments WHERE user_id = $2 AND status = 'approved')
+			   OR (ce.batch_id IS NULL AND ce.course_id IN (SELECT course_id FROM enrollments WHERE user_id = $2 AND status = 'approved')))
+		) h ORDER BY day, prio`, c.Query("date"), userID, days)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid date"})
+		return
+	}
+	defer rows.Close()
+
+	type upcomingHoliday struct {
+		Date   string `json:"date"`
+		Reason string `json:"reason"`
+	}
+	holidays := []upcomingHoliday{}
+	for rows.Next() {
+		var h upcomingHoliday
+		if err := rows.Scan(&h.Date, &h.Reason); err == nil {
+			holidays = append(holidays, h)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"holidays": holidays})
+}
+
 func AdminGetHolidays(c *gin.Context) {
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT id, date::text, reason, created_at FROM holidays ORDER BY date DESC`)
+		`SELECT id, date::text, reason, created_at, 'holiday' AS source FROM holidays
+		 UNION ALL
+		 SELECT ce.id, d::date::text, ce.title || COALESCE(' · ' || b.name, ''), ce.created_at, 'calendar'
+		 FROM calendar_events ce
+		 LEFT JOIN batches b ON b.id = ce.batch_id,
+		 LATERAL generate_series(ce.date::timestamp, LEAST(COALESCE(ce.end_date, ce.date), ce.date + 366)::timestamp, interval '1 day') d
+		 WHERE ce.event_type = 'holiday'
+		 ORDER BY 2 DESC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to fetch holidays"})
 		return
@@ -417,7 +469,7 @@ func AdminGetHolidays(c *gin.Context) {
 	var holidays []models.Holiday
 	for rows.Next() {
 		var h models.Holiday
-		if err := rows.Scan(&h.ID, &h.Date, &h.Reason, &h.CreatedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.Date, &h.Reason, &h.CreatedAt, &h.Source); err != nil {
 			continue
 		}
 		holidays = append(holidays, h)

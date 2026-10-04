@@ -11,6 +11,7 @@ import (
 
 	"edunova-server/database"
 	"edunova-server/models"
+	"edunova-server/services"
 )
 
 func percentage(obtained, total float64) float64 {
@@ -27,7 +28,7 @@ func AdminGetResults(c *gin.Context) {
 
 	query := `SELECT r.id, r.user_id, u.full_name, COALESCE(u.student_class,''),
 		 r.subject, r.exam_name, r.exam_date::text, r.marks_obtained, r.marks_total,
-		 COALESCE(r.remarks,''), r.created_at
+		 COALESCE(r.remarks,''), r.absent, r.created_at
 		 FROM student_results r
 		 JOIN users u ON u.id = r.user_id`
 	args := []interface{}{}
@@ -67,7 +68,7 @@ func AdminGetResults(c *gin.Context) {
 		var r models.StudentResult
 		if err := rows.Scan(&r.ID, &r.UserID, &r.StudentName, &r.StudentClass,
 			&r.Subject, &r.ExamName, &r.ExamDate, &r.MarksObtained, &r.MarksTotal,
-			&r.Remarks, &r.CreatedAt); err != nil {
+			&r.Remarks, &r.Absent, &r.CreatedAt); err != nil {
 			continue
 		}
 		r.Percentage = percentage(r.MarksObtained, r.MarksTotal)
@@ -117,6 +118,109 @@ func AdminCreateResult(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "result added"})
+}
+
+// AdminBulkCreateResults saves one exam's marks for many students at once.
+// Re-saving the same exam corrects existing rows instead of duplicating them.
+func AdminBulkCreateResults(c *gin.Context) {
+	var req models.BulkCreateResultsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	for _, row := range req.Rows {
+		if row.MarksObtained > req.MarksTotal {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "marks obtained cannot exceed total marks"})
+			return
+		}
+		if !teacherCanUseStudentID(c, row.UserID) {
+			c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "not authorized for one or more students"})
+			return
+		}
+	}
+
+	var createdBy interface{}
+	if adminID, _ := c.Get("admin_id"); adminID != nil && adminID != 0 {
+		createdBy = adminID
+	}
+
+	ctx := context.Background()
+	tx, err := database.DB.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var created []models.BulkResultRow
+	for _, row := range req.Rows {
+		if row.Absent {
+			row.MarksObtained = 0
+		}
+		tag, err := tx.Exec(ctx,
+			`UPDATE student_results SET marks_obtained=$1, marks_total=$2, remarks=$3, absent=$4, updated_at=NOW()
+			 WHERE user_id=$5 AND subject=$6 AND exam_name=$7 AND exam_date=$8`,
+			row.MarksObtained, req.MarksTotal, row.Remarks, row.Absent, row.UserID, req.Subject, req.ExamName, req.ExamDate)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to save results"})
+			return
+		}
+		if tag.RowsAffected() > 0 {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO student_results (user_id, subject, exam_name, exam_date, marks_obtained, marks_total, remarks, absent, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			row.UserID, req.Subject, req.ExamName, req.ExamDate, row.MarksObtained, req.MarksTotal, row.Remarks, row.Absent, createdBy); err != nil {
+			c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to save results"})
+			return
+		}
+		created = append(created, row)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to save results"})
+		return
+	}
+	go notifyGuardiansOfResults(req, created)
+	c.JSON(http.StatusCreated, gin.H{"saved": len(req.Rows)})
+}
+
+var banglaSubjects = map[string]string{
+	"Math": "গণিত", "Science": "বিজ্ঞান", "English": "ইংরেজি", "Bengali": "বাংলা",
+	"Social Science": "সমাজবিজ্ঞান", "Physics": "পদার্থবিজ্ঞান", "Chemistry": "রসায়ন", "Biology": "জীববিজ্ঞান",
+}
+
+// notifyGuardiansOfResults pushes one message per newly recorded result, so
+// corrections to an already-saved exam don't re-notify.
+func notifyGuardiansOfResults(req models.BulkCreateResultsRequest, rows []models.BulkResultRow) {
+	ctx := context.Background()
+	for _, row := range rows {
+		var name string
+		if err := database.DB.QueryRow(ctx, `SELECT full_name FROM users WHERE id=$1`, row.UserID).Scan(&name); err != nil {
+			continue
+		}
+		subject := banglaSubjects[req.Subject]
+		if subject == "" {
+			subject = req.Subject
+		}
+		title := "নতুন ফলাফল"
+		body := fmt.Sprintf("%s %s পরীক্ষায় %.0f/%.0f পেয়েছে (%s)", name, subject, row.MarksObtained, req.MarksTotal, req.ExamName)
+		if row.Absent {
+			body = fmt.Sprintf("%s আজ %s পরীক্ষায় (%s) অনুপস্থিত ছিল", name, subject, req.ExamName)
+		}
+		data := map[string]string{"type": "result"}
+		for _, token := range fetchUserTokens(ctx, row.UserID) {
+			_ = services.SendFCMV1ToTokenWithData(token, title, body, data)
+		}
+		storeNotification(ctx, title, body, "student", row.UserID, 0, "result", 0)
+
+		sms := fmt.Sprintf("%s: %s %s %.0f/%.0f", name, subject, req.ExamName, row.MarksObtained, req.MarksTotal)
+		if row.Absent {
+			sms = fmt.Sprintf("%s: %s %s অনুপস্থিত", name, subject, req.ExamName)
+		}
+		sendResultSMS(ctx, row.UserID, sms)
+	}
 }
 
 func AdminUpdateResult(c *gin.Context) {
@@ -170,7 +274,7 @@ func UserGetResults(c *gin.Context) {
 	}
 
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT id, user_id, subject, exam_name, exam_date::text, marks_obtained, marks_total, COALESCE(remarks,''), created_at
+		`SELECT id, user_id, subject, exam_name, exam_date::text, marks_obtained, marks_total, COALESCE(remarks,''), absent, created_at
 		 FROM student_results WHERE user_id = $1 ORDER BY exam_date DESC, id DESC`, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
@@ -182,7 +286,7 @@ func UserGetResults(c *gin.Context) {
 	for rows.Next() {
 		var r models.StudentResult
 		if err := rows.Scan(&r.ID, &r.UserID, &r.Subject, &r.ExamName, &r.ExamDate,
-			&r.MarksObtained, &r.MarksTotal, &r.Remarks, &r.CreatedAt); err != nil {
+			&r.MarksObtained, &r.MarksTotal, &r.Remarks, &r.Absent, &r.CreatedAt); err != nil {
 			continue
 		}
 		r.Percentage = percentage(r.MarksObtained, r.MarksTotal)
@@ -206,7 +310,7 @@ func UserGetResultSummary(c *gin.Context) {
 	}
 
 	rows, err := database.DB.Query(context.Background(),
-		`SELECT id, subject, exam_name, exam_date::text, marks_obtained, marks_total, COALESCE(remarks,''), created_at
+		`SELECT id, subject, exam_name, exam_date::text, marks_obtained, marks_total, COALESCE(remarks,''), absent, created_at
 		 FROM student_results WHERE user_id = $1 ORDER BY exam_date DESC, id DESC`, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "database error"})
@@ -218,7 +322,7 @@ func UserGetResultSummary(c *gin.Context) {
 	for rows.Next() {
 		var r models.StudentResult
 		if err := rows.Scan(&r.ID, &r.Subject, &r.ExamName, &r.ExamDate,
-			&r.MarksObtained, &r.MarksTotal, &r.Remarks, &r.CreatedAt); err != nil {
+			&r.MarksObtained, &r.MarksTotal, &r.Remarks, &r.Absent, &r.CreatedAt); err != nil {
 			continue
 		}
 		r.UserID = userID
@@ -236,11 +340,13 @@ func UserGetResultSummary(c *gin.Context) {
 		return
 	}
 
-	summary.TotalExams = len(all)
-
 	var totalObtained, totalMarks float64
 	subjectTotals := map[string]*models.ResultSubjectSummary{}
 	for _, r := range all {
+		if r.Absent {
+			continue
+		}
+		summary.TotalExams++
 		totalObtained += r.MarksObtained
 		totalMarks += r.MarksTotal
 		s, exists := subjectTotals[r.Subject]
